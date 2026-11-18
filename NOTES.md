@@ -305,3 +305,64 @@ OFFLINE WORK (no cameras, no headset):
   view + poses + pairs). Cleans up, hands cameras back, beeps (tools/sounds).
 NEXT: in-headset test of the new viewer (transparency, paint mode, save/reset); TSDF-style ray fusion
 or GPU stereo if noise/throughput still limit; cooperative camera access if Arcturus answers.
+
+## 2026-11-18 02:30-03:30: live6 review, TSDF, planning tools, export, GNSS (offline only)
+User feedback on live6 (8.5 min session, recorded): works, controllers fine; "points move by a different
+amount than the camera image when rotating (parallax / FOV mismatch?)"; "points track worse than SteamVR
+windows"; wants faster + fewer-but-more-accurate points; SteamVR still starts in "paused / Resume".
+
+Analysis of live6:
+* Pose timing re-fitted on live6 (re/calib_world.py): best delta -4.6 ms, extrinsic refit improves the
+  3-D residual only 5.83 -> 5.67 cm => our cloud geometry/timing is fine; residual = stereo noise.
+* While arcgrab owns the colour cameras the passthrough falls back to the IR tracking cameras (blue-ish
+  composited view). SteamVR reprojects passthrough onto a depth *proxy* (the roomview mesh we decoded):
+  anything not at the proxy depth shows parallax vs. correctly world-locked content. Our points are
+  world-locked, so part of the mismatch is the passthrough, not the cloud. The other part is real:
+  spray/fog points at wrong depth slide over the image when the eyes translate -> fixed by TSDF below.
+* Godot ran at 72 fps = display rate (Frame refresh 72 Hz) but reloading 400k points took 36-60 ms on the
+  main thread every publish -> dropped frames -> the cloud judders vs. compositor-rendered windows.
+  Fixed by tiled loading (only changed 1 m tiles, per-frame budget, frustum-culled AABBs).
+* Old server: 787 fused frames in 516 s (1.5/s), fusion cost grew with map size (np.insert / carving of
+  1.4 M voxels).
+
+New pipeline (all tested on recordings / headless; NOT yet in the headset):
+* src/tsdf.cpp (+ tools/tsdf.py, ctypes, auto-built to build/libpc.so): sparse 8^3-block TSDF, 8-byte
+  voxels, projective update (one observation per voxel per frame), noise-adaptive band 3 sigma(Z) clamped
+  [2 voxels, 12 cm], conservative carving with 3x3-min depth, block GC of spray, zero-crossing extraction
+  with min_frames, raycast for picking (15 us).
+  Hold-out test on live6 (fuse odd frames, test against even frames, re/holdout_eval.py):
+     voxel fuser: floaters (point in front of measured surface > 3 sigma) 20.0 %
+     TSDF 2 cm, min 5 frames: floaters 7.8 %, 2.7x fewer points (71k vs 193k for 100 pairs)
+  fusion 25-40 ms/frame (was 100-300 ms and growing). Memory ~160 MB per 40k blocks.
+* src/raw10.cpp: RAW10 -> 2x2-binned BGR in 4 ms (numpy unpack+demosaic was ~50 ms/pair); bit-exact.
+* tools/pcserver.py rewritten: TSDF, min depth 0.35 m (fewer SGBM disparities), cv2 threads 3 (leave cores
+  for XR), ~8 pairs/s on replay (was 1.5). Publishes tiles (pcpub PCLD0002), 30 Hz raycast of the right
+  controller aim -> /dev/shm/pchit.json, status -> /dev/shm/pcstatus.json. Scan modes auto/paint/off.
+* Viewer (viewer/pc_main.gd + cloud_tiles.gd + scene_model.gd): tools SCAN > PAINT > ANCHOR > BOX > PATH
+  (right A). Placement on the scanned surface under the ray (green reticle) or free at the ray tip
+  (orange, right stick = distance, stick click toggles snap). Boxes: 4 clicks (edge, width, height) or
+  3 + grip = 4 cm panel (solar panels); level/plumb snapping within 7 deg; dimensions shown. Paths: clicks
+  + grip, length shown. B = undo. Left: trigger alpha, X hide cloud, Y save (scene JSON + PLY with the
+  same name in captures/sessions/), stick click pause scanning, grip hold 1 s clear cloud / 3 s also objects.
+  Scene autosaved to captures/sessions/autosave_scene.json and reloaded at start (STAGE is persistent).
+  Headless tests: godot --headless --path viewer --xr-mode off -s res://tests/test_headless.gd (13 ok).
+* Export: tools/scene_export.py scene.json [--enu] -> .glb (cloud POINTS + colours unlit, boxes, path tubes,
+  anchor empties; loads in Godot's glTF importer) + anchors CSV. tools/blender_import.py (run in Blender)
+  builds editable curves (bevel = conduit diameter), empties, real-size boxes, coloured point mesh
+  (UNTESTED: no Blender binary here). Example: captures/fused/live6/live6_demo.glb (full live6 TSDF cloud).
+* GNSS: tools/gnssd.py --port /dev/ttyACM0 [--lever x y z]: NMEA GGA(+GST/RMC) over USB serial (termios,
+  no pyserial), poses from src/posestream (read-only OpenVR background client, 100 Hz, same line format
+  as hmd_500hz.txt), UTC->monotonic via min(t_rx - t_utc), 4-DoF fit ENU = Rz(yaw) M stage + t with outlier
+  rejection, ok once horizontal spread >= 3 m. Raw NMEA logged to captures/gnss/ for reprocessing
+  (--offline LOG --pose-file). tools/gnss_sim.py: RTK-like simulation on the live6 trajectory -> yaw
+  37.007 vs 37.000 deg, absolute positions < 1 mm. Viewer shows fix/sats/hacc/georef rms; saved scenes
+  carry the georef; export --enu uses it. tools/pcsession.sh --gnss PORT starts it.
+  Hardware notes: any receiver that emits NMEA GGA works; GST gives real accuracy (u-blox: enable GST).
+  RTK (F9P etc.) needed for cm-level; with plain GPS (2-5 m) the yaw needs tens of metres of walking.
+
+"Paused / Resume" at start: most likely the SteamVR dashboard is open when the app starts (it is
+launched from the desktop/terminal shown inside the dashboard), so SteamVR keeps the dashboard in front
+and reports the app as paused until "Resume" closes the dashboard. Not an app bug; launching with a delay
+(close the dashboard during the countdown) would avoid it.
+
+Next in headset: tools/pcsession.sh --record captures/live7 ; try tools; compare judder/parallax.
