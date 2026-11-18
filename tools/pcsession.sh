@@ -2,9 +2,11 @@
 # One-command live point-cloud session on the Steam Frame:
 #   src/arcgrab (Arcturus cameras + 500 Hz poses) -> tools/pcserver.py (stereo + fusion) -> viewer (Godot/OpenXR)
 #
-# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer] [--gnss PORT]
+# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer] [--gnss PORT] [--delay S]
 #   --replay RECDIR  feed a recording through /dev/shm/arcgrab instead of the cameras (no camera handover)
 #   --record OUTDIR  also save stereo pairs (1 fps), 500 Hz poses and the composited headset view (2 fps)
+#   --delay S        wait S seconds (beeping) before the viewer starts: close the SteamVR dashboard meanwhile,
+#                    otherwise SteamVR shows the app as paused until you press "Resume"
 #   --gnss PORT      run tools/gnssd.py on a USB serial GNSS receiver (e.g. /dev/ttyACM0) for georeferencing
 # Saved sessions (left Y in the viewer) land in captures/sessions/scan_*.{json,ply};
 # export with tools/scene_export.py captures/sessions/scan_*.json  (-> .glb for Blender)
@@ -14,7 +16,7 @@
 # tracking afterwards, restart SteamVR. See NOTES.md.
 set -u
 cd "$(dirname "$0")/.."
-SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS="" 
+SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS=""; DELAY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_RUN=$2; shift 2;;
@@ -23,6 +25,7 @@ while [ $# -gt 0 ]; do
     --scale) SCALE=$2; shift 2;;
     --no-viewer) VIEWER=0; shift;;
     --gnss) GNSS=$2; shift 2;;
+    --delay) DELAY=$2; shift 2;;
     *) echo "unknown option $1"; exit 1;;
   esac
 done
@@ -54,6 +57,7 @@ if [ -n "$GNSS" ]; then
   $PY -I tools/gnssd.py --port "$GNSS" > "$LOG/gnssd.log" 2>&1 & PIDS+=($!)
 fi
 if [ $VIEWER = 1 ]; then
+  for i in $(seq 1 "$DELAY"); do pw-play tools/sounds/beep.wav 2>/dev/null & sleep 1; done
   timeout "$SECONDS_RUN" "$GODOT" --path viewer --xr-mode on > "$LOG/viewer.log" 2>&1 & VPID=$!; PIDS+=($VPID)
 fi
 sleep 5; pw-play tools/sounds/start.wav 2>/dev/null &
