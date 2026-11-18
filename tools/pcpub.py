@@ -61,18 +61,25 @@ def publish(xyz, rgb, path=PATH, max_points=400000, seq=None, tile=1.0):
 
 def read_ply(fn):
     raw = open(fn, "rb").read(); h = raw.index(b"end_header\n") + 11
-    a = np.frombuffer(raw[h:], dtype=[("p", "<f4", 3), ("c", "u1", 3)])
+    lab = b"property uchar label" in raw[:h]
+    a = np.frombuffer(raw[h:], dtype=[("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if lab else []))
     return a["p"], a["c"]
 
 
-def write_ply(fn, P, C):
-    """P (N,3) float, C (N,3) RGB float 0..1 or uint8."""
+def write_ply(fn, P, C, L=None):
+    """P (N,3) float, C (N,3) RGB float 0..1 or uint8, L (N,) uint8 label ids (tools/zones.py LABELS) or None."""
     os.makedirs(os.path.dirname(os.path.abspath(fn)), exist_ok=True)
     C = np.asarray(C); C = C if C.dtype == np.uint8 else np.clip(C * 255 + 0.5, 0, 255).astype(np.uint8)
-    rec = np.empty(len(P), dtype=[("p", "<f4", 3), ("c", "u1", 3)]); rec["p"] = P; rec["c"] = C
+    dt = [("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if L is not None else [])
+    rec = np.empty(len(P), dtype=dt); rec["p"] = P; rec["c"] = C
+    if L is not None:
+        rec["l"] = L
     with open(fn, "wb") as fh:
         fh.write(f"ply\nformat binary_little_endian 1.0\nelement vertex {len(P)}\nproperty float x\nproperty float y\nproperty float z\n"
-                 "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n".encode()); fh.write(rec.tobytes())
+                 "property uchar red\nproperty uchar green\nproperty uchar blue\n".encode())
+        if L is not None:
+            fh.write(b"property uchar label\n")
+        fh.write(b"end_header\n"); fh.write(rec.tobytes())
 
 
 if __name__ == "__main__":

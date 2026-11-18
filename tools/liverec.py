@@ -7,7 +7,10 @@ import argparse, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arcshm import ArcShm
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--seconds", type=float, default=30); ap.add_argument("--fps", type=float, default=3)
+ap.add_argument("--force", action="store_true", help="allow overwriting an existing recording")
 a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
+if not a.force and any(os.path.exists(os.path.join(a.out, f)) for f in ("frames.jsonl", "00000_left.y10p")):
+    sys.exit(f"liverec: {a.out} already contains a recording (use a new directory or --force)")
 s = ArcShm()
 json.dump(dict(line_px=s.line_px, line_bytes=s.line_bytes, black=s.black, bayer="RGGB", cams=["left", "right"],
                devices=["/dev/video0 arcimx616 0-001a crop x=550", "/dev/video3 arcimx616 0-0010 crop x=250"]),

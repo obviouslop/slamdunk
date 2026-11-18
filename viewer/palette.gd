@@ -103,6 +103,19 @@ func set_active(id: String, on: bool, color = null) -> void:
 	_refresh(id)
 
 
+func set_shown(id: String, on: bool) -> void:
+	## Per-tool buttons: hidden buttons are not drawn and not hit (their cell stays reserved).
+	if not buttons.has(id) or buttons[id]["enabled"] == on:
+		return
+	buttons[id]["enabled"] = on
+	buttons[id]["quad"].visible = on
+	buttons[id]["label"].visible = on
+	if not on and hovered == id:
+		hovered = ""
+	if not on and confirm_id == id:
+		confirm_id = ""
+
+
 func set_text(id: String, t: String) -> void:
 	if buttons.has(id) and buttons[id]["text"] != t:
 		buttons[id]["text"] = t
@@ -139,7 +152,7 @@ func ray_hit(origin: Vector3, dir: Vector3) -> Variant:
 			if t > 0.0 and t < 1.5:
 				var p := o + d * t
 				for id in buttons:
-					if (buttons[id]["rect"] as Rect2).has_point(Vector2(p.x, p.y)):
+					if buttons[id]["enabled"] and (buttons[id]["rect"] as Rect2).has_point(Vector2(p.x, p.y)):
 						hovered = id
 						res = {"id": id, "point": global_transform * p, "dist": t * dir.length()}
 						break

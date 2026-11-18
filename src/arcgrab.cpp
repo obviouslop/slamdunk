@@ -8,7 +8,9 @@
 //
 // Publishes every frame to /dev/shm/arcgrab (see ShmHdr) for consumers (tools/arcshm.py).
 // Bayer: BGGR (verified visually on cropped 2464x2464 output).
-// Poses: --pose-log FILE writes the 500 Hz history (t valid qw qx qy qz px py pz).
+// Poses: --pose-log FILE writes the 500 Hz history (t valid qw qx qy qz px py pz), and FILE.controllers the
+// left/right controller poses from the same query (t role valid qw qx qy qz px py pz; role 1 = left, 2 = right).
+// build: g++ -O2 -std=c++17 -o src/arcgrab src/arcgrab.cpp -Isrc -L$HOME/.local/share/Steam/steamrtarm64 -lopenvr_api -lpthread -Wl,-rpath,$HOME/.local/share/Steam/steamrtarm64
 // usage: arcgrab [--seconds S] [--save-every N] [--out DIR] [--exp LINES] [--gain CODE]
 //                [--no-ae] [--raw]
 //
@@ -59,14 +61,30 @@ struct PoseHistory {
   static constexpr int N = 4096;
   PoseSample buf[N]; long head = 0; std::mutex mu; std::thread th; std::atomic<bool> run{false};
   FILE* log = nullptr;
+  FILE* clog = nullptr;     // controllers: <log>.controllers (t role valid qw qx qy qz px py pz), role 1 = left, 2 = right
   void start(vr::IVRSystem* sys, const char* log_path) {
-    if (log_path) log = fopen(log_path, "w");
+    if (log_path) { log = fopen(log_path, "w"); std::string cp = std::string(log_path) + ".controllers"; clog = fopen(cp.c_str(), "w"); }
     run = true;
     th = std::thread([this, sys] {
+      int roles[vr::k_unMaxTrackedDeviceCount] = {0}; long iter = 0;
       while (run) {
-        vr::TrackedDevicePose_t tp;
-        sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, &tp, 1);
+        vr::TrackedDevicePose_t tps[vr::k_unMaxTrackedDeviceCount];
+        const uint32_t nq = clog ? vr::k_unMaxTrackedDeviceCount : 1;
+        sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, tps, nq);
+        vr::TrackedDevicePose_t& tp = tps[0];
         timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+        if (clog) {
+          if (iter++ % 250 == 0)       // re-check which devices are controllers twice a second
+            for (uint32_t i = 1; i < vr::k_unMaxTrackedDeviceCount; i++)
+              roles[i] = sys->GetTrackedDeviceClass(i) == vr::TrackedDeviceClass_Controller ? (int)sys->GetControllerRoleForTrackedDeviceIndex(i) : 0;
+          for (uint32_t i = 1; i < nq; i++) {
+            if (roles[i] != vr::TrackedControllerRole_LeftHand && roles[i] != vr::TrackedControllerRole_RightHand) continue;
+            double q[4]; mat_to_quat(tps[i].mDeviceToAbsoluteTracking.m, q);
+            const auto& m = tps[i].mDeviceToAbsoluteTracking.m;
+            fprintf(clog, "%.6f %d %d %.7f %.7f %.7f %.7f %.5f %.5f %.5f\n", tn.tv_sec + tn.tv_nsec * 1e-9, roles[i],
+                    (int)(tps[i].bPoseIsValid && tps[i].eTrackingResult == vr::TrackingResult_Running_OK), q[0], q[1], q[2], q[3], m[0][3], m[1][3], m[2][3]);
+          }
+        }
         PoseSample s; s.t = tn.tv_sec + tn.tv_nsec * 1e-9; s.valid = tp.bPoseIsValid && tp.eTrackingResult == vr::TrackingResult_Running_OK;
         mat_to_quat(tp.mDeviceToAbsoluteTracking.m, s.q);
         for (int i = 0; i < 3; i++) s.p[i] = tp.mDeviceToAbsoluteTracking.m[i][3];
@@ -79,7 +97,7 @@ struct PoseHistory {
       }
     });
   }
-  void stop() { run = false; if (th.joinable()) th.join(); if (log) fclose(log); log = nullptr; }
+  void stop() { run = false; if (th.joinable()) th.join(); if (log) fclose(log); log = nullptr; if (clog) fclose(clog); clog = nullptr; }
   bool at(double t, float out[12]) {   // interpolate (slerp/lerp); false if outside history or invalid
     std::lock_guard<std::mutex> l(mu);
     if (head < 2) return false;

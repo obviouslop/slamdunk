@@ -49,7 +49,7 @@ class LiveStereo:
         n = int(2464 * scale); self.size = (n, n)
         R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(self.KL, self.DL, self.KR, self.DR, (2464, 2464), self.R, self.t.reshape(3, 1),
                                                       flags=cv2.CALIB_ZERO_DISPARITY, newImageSize=self.size, balance=0.0, fov_scale=1.0)
-        self.R1, self.P1, self.P2 = R1, P1, P2
+        self.R1, self.R2, self.P1, self.P2 = R1, R2, P1, P2
         # Source images are 2x2-binned (1232^2): binned pixel i covers full pixels 2i, 2i+1 -> centre 2i+0.5,
         # so K_half = K/2 with c_half = (c - 0.5)/2. Distortion is in normalised coordinates (unchanged).
         def half(K):

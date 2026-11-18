@@ -26,6 +26,7 @@ from arcshm import ArcShm
 from livestereo import LiveStereo
 from tsdf import TSDF, bin_raw10, cone_pixels
 import ptpub
+import zones as zonemod
 import pcpub
 import stills
 
@@ -94,6 +95,22 @@ def to_map(A34):
     """3x4 STAGE pose/aim -> MAP frame"""
     M = np.eye(4); M[:3, :4] = np.asarray(A34, float).reshape(3, 4); return (Tc @ M)[:3, :4]
 stop = False
+zf = zonemod.ZoneFile()       # inclusion / exclusion / label zones from the viewer (MAP frame)
+
+
+def extract_kept():
+    """Fused surface points with the zones applied -> P, C, labels"""
+    with lock:
+        P, C, w = ts.extract(min_frames=a.min_frames)
+    if not zf.zones:
+        return P, C, np.zeros(len(P), np.uint8)
+    keep, lab = zonemod.evaluate(P, zf.zones)
+    return P[keep], C[keep], lab[keep]
+
+
+def publish_cloud():
+    P, C, _ = extract_kept()
+    return pcpub.publish(P, C, max_points=a.max_pub, tile=a.tile)
 
 
 def pick_loop():
@@ -106,8 +123,13 @@ def pick_loop():
             continue
         last_t = ctl.get("t_ms")
         A = to_map(ctl["aim"])
-        with lock:
-            h = ts.raycast(A[:, 3], -A[:, 2], tmin=0.05, tmax=8.0, min_frames=max(2, a.min_frames - 1))
+        t0r = 0.05
+        for _ in range(6):            # skip surfaces removed by zones (continue the ray behind them)
+            with lock:
+                h = ts.raycast(A[:, 3], -A[:, 2], tmin=t0r, tmax=8.0, min_frames=max(2, a.min_frames - 1))
+            if h is None or not zf.zones or zonemod.point_kept(h[0], zf.zones):
+                break
+            t0r = h[2] + 0.04; h = None
         seq += 1
         d = {"seq": seq, "aim_t_ms": last_t, "hit": h is not None}
         if h is not None:
@@ -159,8 +181,8 @@ def handle_cmd(ctl):
             print("map reset", flush=True)
         elif c == "save":
             name = os.path.basename(ctl.get("name") or time.strftime("scan_%Y%m%d_%H%M%S"))
-            with lock: P, C, w = ts.extract(min_frames=a.min_frames)
-            fn = os.path.join(SAVE_DIR, name + ".ply"); pcpub.write_ply(fn, P, C); saved = fn
+            P, C, L = extract_kept()
+            fn = os.path.join(SAVE_DIR, name + ".ply"); pcpub.write_ply(fn, P, C, L if L.any() else None); saved = fn
             print(f"saved {len(P)} points -> {fn}", flush=True)
         elif c == "still":
             threading.Thread(target=take_still, daemon=True).start()
@@ -178,6 +200,8 @@ try:
         fuse = not (scan == "off" or (scan == "paint" and not painting))
         if not fuse and not want_pt:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
+            if zf.poll():                     # zones edited while not scanning: show the result right away
+                npub = publish_cloud(); print(f"zones: {len(zf.zones)} -> {npub} points", flush=True)
             if time.monotonic() - t_pub > a.publish_every:
                 t_pub = time.monotonic()
                 write_status(0.0)
@@ -214,11 +238,9 @@ try:
             ts.integrate(ls, Z, rgb, T, mask=mask)
         write_align()
         n_frames += 1; tst.append(t2 - t1); tfu.append(time.monotonic() - t2); t_fr.append(time.monotonic())
-        if time.monotonic() - t_pub > a.publish_every:
+        if zf.poll() or time.monotonic() - t_pub > a.publish_every:
             t_pub = time.monotonic()
-            with lock:
-                P, C, w = ts.extract(min_frames=a.min_frames)
-            npub = pcpub.publish(P, C, max_points=a.max_pub, tile=a.tile)
+            npub = publish_cloud()
             fps = (len(t_fr[-20:]) - 1) / max(t_fr[-1] - t_fr[-20:][0], 1e-3) if len(t_fr) > 1 else 0.0
             last_fps = fps; write_status(fps)
             print(f"frame {last_frame}: {n_frames} fused ({fps:.1f}/s), stereo {np.mean(tst[-10:])*1000:.0f} ms, "

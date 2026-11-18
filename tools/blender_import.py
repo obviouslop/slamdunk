@@ -34,7 +34,8 @@ def stage_to_blender_matrix(georef=None, enu=False):
 
 def read_ply(fn):
     raw = open(fn, "rb").read(); h = raw.index(b"end_header\n") + 11
-    a = np.frombuffer(raw[h:], dtype=[("p", "<f4", 3), ("c", "u1", 3)])
+    lab = b"property uchar label" in raw[:h]           # saved with zone labels (tools/zones.py)
+    a = np.frombuffer(raw[h:], dtype=[("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if lab else []))
     return a["p"].astype(float), a["c"]
 
 
