@@ -1,4 +1,4 @@
-// RAW10 (MIPI packed, BGGR) -> 2x2-binned half-resolution BGR float, black level removed.
+// RAW10 (MIPI packed, RGGB: R at (0,0); verified on stills, 2026-11-18) -> 2x2-binned half-resolution BGR float, black level removed.
 // Replaces the numpy unpack + LiveStereo._rgb (about 50 ms per pair -> a few ms).
 #include <cstdint>
 #include <algorithm>
@@ -15,8 +15,8 @@ extern "C" void pc_bin_raw10(const uint8_t* buf, int W, int H, int stride, int s
             int a0 = (a[0] << 2) | (a[4] & 3), a1 = (a[1] << 2) | ((a[4] >> 2) & 3), a2 = (a[2] << 2) | ((a[4] >> 4) & 3), a3 = (a[3] << 2) | ((a[4] >> 6) & 3);
             int b0 = (b[0] << 2) | (b[4] & 3), b1 = (b[1] << 2) | ((b[4] >> 2) & 3), b2 = (b[2] << 2) | ((b[4] >> 4) & 3), b3 = (b[3] << 2) | ((b[4] >> 6) & 3);
             float* p = o + g * 6;
-            p[0] = std::max(0.f, a0 - black); p[1] = std::max(0.f, 0.5f * (a1 + b0) - black); p[2] = std::max(0.f, b1 - black);
-            p[3] = std::max(0.f, a2 - black); p[4] = std::max(0.f, 0.5f * (a3 + b2) - black); p[5] = std::max(0.f, b3 - black);
+            p[2] = std::max(0.f, a0 - black); p[1] = std::max(0.f, 0.5f * (a1 + b0) - black); p[0] = std::max(0.f, b1 - black);
+            p[5] = std::max(0.f, a2 - black); p[4] = std::max(0.f, 0.5f * (a3 + b2) - black); p[3] = std::max(0.f, b3 - black);
         }
     }
 }

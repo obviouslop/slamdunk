@@ -10,6 +10,7 @@ Writes captures/stills/<YYYYmmdd_HHMMSS_mmm>/
                         camera-to-STAGE poses for the raw sensor (stage_from_cam, matches the factory
                         calibration) and for the upright JPEG (stage_from_cam_jpg, jpg_rotation), calibration file, GNSS fix, georeference, camera lat/lon/h
 Used by tools/pcserver.py (viewer command "still"); standalone:  stills.py [--out DIR]  (needs arcgrab running)
+Re-render the JPGs of existing stills from their raw files:  stills.py --regen DIR...
 """
 import json, os, struct, sys, time, datetime
 import numpy as np
@@ -107,9 +108,9 @@ def _read_json(p):
 
 
 def colour_full(raw16, black=64, wb=None):
-    """BGGR 10-bit mosaic -> 8-bit BGR full resolution, grey-world white balance, gamma 2.2."""
+    """RGGB 10-bit mosaic (R at (0,0)) -> 8-bit BGR full resolution, grey-world white balance, gamma 2.2."""
     m = np.clip(raw16.astype(np.int32) - black, 0, 1023).astype(np.uint16)
-    bgr = cv2.cvtColor(m, cv2.COLOR_BayerRG2BGR).astype(np.float32)   # OpenCV names Bayer by the 2nd row: BGGR -> RG
+    bgr = cv2.cvtColor(m, cv2.COLOR_BayerBG2BGR).astype(np.float32)   # OpenCV's BG code = R at (0,0) (tested)
     if wb is None:
         mm = bgr[::8, ::8].reshape(-1, 3).mean(0); wb = mm.mean() / np.maximum(mm, 1e-3)
     bgr *= wb
@@ -182,7 +183,7 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
             "stage_from_cam_jpg": {}, "jpg_rotation": {},
             "calibration": os.path.relpath(CAL, os.path.dirname(d)),
             "raw": {"width": shm.line_px, "line_bytes": shm.line_bytes, "skip_lines": shm.skip, "black": shm.black,
-                    "bayer": "BGGR", "format": "RAW10 packed (MIPI)"},
+                    "bayer": "RGGB", "format": "RAW10 packed (MIPI)"},
             "gnss": gnss, "georef": georef, "lla": lla,
             "map_from_stage": _read_json("/dev/shm/pcalign.json").get("map_from_stage"),
             "map_note": "the fused cloud / scene objects are in the MAP frame: X_map = map_from_stage (3x4) @ X_stage"}
@@ -214,8 +215,34 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
     return d
 
 
+def regen_jpgs(d):
+    """Re-render left/right.jpg of an existing still directory from its raw .y10p files (keeps the EXIF segment)."""
+    meta = json.load(open(os.path.join(d, "meta.json")))
+    r = meta["raw"]; rots = {"90ccw": cv2.ROTATE_90_COUNTERCLOCKWISE, "90cw": cv2.ROTATE_90_CLOCKWISE, "180": cv2.ROTATE_180}
+    for side in ("left", "right"):
+        b = open(os.path.join(d, side + ".y10p"), "rb").read()
+        H = min(len(b) // r["line_bytes"] - r["skip_lines"], r["width"])
+        raw = unpack_raw(b[r["skip_lines"] * r["line_bytes"]:], W=r["width"], H=H, S=r["line_bytes"])
+        img, _ = colour_full(raw, black=r["black"])
+        rot = rots.get(meta["jpg_rotation"].get(side, "none"))
+        if rot is not None:
+            img = cv2.rotate(img, rot)
+        jp = os.path.join(d, side + ".jpg"); old = open(jp, "rb").read()
+        assert old[2:4] == b"\xff\xe1"
+        n = struct.unpack(">H", old[4:6])[0]
+        with open(jp, "wb") as f:
+            f.write(jpeg_with_exif(img, old[6:4 + n]))
+    meta["raw"]["bayer"] = "RGGB"
+    with open(os.path.join(d, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=1)
+
+
 if __name__ == "__main__":
     import argparse
+    if len(sys.argv) > 2 and sys.argv[1] == "--regen":       # stills.py --regen DIR...  (re-render JPGs from the raw files)
+        for d in sys.argv[2:]:
+            regen_jpgs(d); print("regenerated", d)
+        sys.exit(0)
     from arcshm import ArcShm
     from livestereo import LiveStereo
     ap = argparse.ArgumentParser(); ap.add_argument("--out", default=OUT); a = ap.parse_args()

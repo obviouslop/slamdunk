@@ -3,7 +3,7 @@
 
     from livestereo import LiveStereo
     ls = LiveStereo(scale=0.5)
-    pts_camL, rgb = ls.points(raw_left, raw_right)        # uint16 mosaics (BGGR, black 64)
+    pts_camL, rgb = ls.points(raw_left, raw_right)        # uint16 mosaics (RGGB, black 64)
     pts_world = ls.to_world(pts_camL, hmd_pose_3x4)       # OpenVR Standing universe, metres
 
 Geometry (verified 2026-11-17, see NOTES.md):
@@ -74,9 +74,9 @@ class LiveStereo:
 
     @staticmethod
     def _rgb(raw):
-        """BGGR mosaic -> half-resolution BGR float (2x2 binning demosaic, 1232^2)."""
+        """RGGB mosaic (R at (0,0)) -> half-resolution BGR float (2x2 binning demosaic, 1232^2)."""
         r = raw.astype(np.float32)
-        b = r[0::2, 0::2]; g = (r[0::2, 1::2] + r[1::2, 0::2]) * 0.5; rr = r[1::2, 1::2]
+        rr = r[0::2, 0::2]; g = (r[0::2, 1::2] + r[1::2, 0::2]) * 0.5; b = r[1::2, 1::2]
         return np.clip(np.stack([b, g, rr], -1) - 64, 0, None)
 
     def rectified(self, rawL, rawR, wb=None, half=False):

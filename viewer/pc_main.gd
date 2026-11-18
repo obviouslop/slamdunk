@@ -84,6 +84,8 @@ var reticle: MeshInstance3D
 var ret_mat: StandardMaterial3D
 var palette: Palette
 var pal_holder: Node3D
+const PAL_OFFSET := Vector3(0.0, 0.09, -0.03)   # in the left controller frame (y up, -z forward)
+const PAL_TILT_DEG := 25.0                         # face tilted up toward the eyes
 var ctrl := {}
 var rays := {}
 var sizes := [0.003, 0.004, 0.006, 0.010, 0.016]
@@ -749,18 +751,12 @@ func _set_ray(hand: String, length: float, color := Color(0.3, 0.9, 1.0)) -> voi
 
 
 func _place_palette() -> void:
-	## Float the toolbox 8 cm above the left controller, facing the eyes (readable at any wrist angle).
+	## Toolbox rigidly attached to the left controller (like Blocks): it follows position AND orientation, standing
+	## 9 cm above the controller, its face toward the user, tilted back PAL_TILT_DEG so it reads when held in front.
 	var lc: XRController3D = ctrl["left_hand"]
 	if not lc.get_has_tracking_data():
 		return
-	var t := lc.global_transform
-	var fwd := -t.basis.z
-	fwd.y = 0.0
-	var pos := t.origin + Vector3.UP * 0.09 + fwd.normalized() * 0.03
-	var eye := camera.global_transform.origin
-	if (pos - eye).length() < 0.05:
-		return
-	pal_holder.global_transform = Transform3D(Basis(), pos).looking_at(pos + (pos - eye), Vector3.UP)
+	pal_holder.global_transform = lc.global_transform * Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-PAL_TILT_DEG)), PAL_OFFSET)
 	var size := (palette.bg.mesh as QuadMesh).size
 	palette.position = Vector3(-size.x * 0.5, size.y * 0.5, 0)
 
@@ -881,6 +877,11 @@ func _update_status() -> void:
 	status.text = "%s  %s%s   %.1f fr/s  %d fps  %dk pts%s" % ["● REC" if scanning else "■ STOP", tool.to_upper(),
 		" ●" if painting else "", float(srv.get("fps", 0.0)), Engine.get_frames_per_second(), cloud.total_points / 1000,
 		"" if cloud.visible else "  (hidden)"]
+	# always-visible time + camera frame stamp, to find a moment of a composited capture in the recording
+	# (f = arcgrab frame number = the "frame" field of frames.jsonl / poses.jsonl)
+	var ut := Time.get_unix_time_from_system()
+	var dt := Time.get_datetime_dict_from_unix_time(int(ut) + int(Time.get_time_zone_from_system()["bias"]) * 60)
+	status.text += "   %02d:%02d:%02d.%d  f%d" % [dt["hour"], dt["minute"], dt["second"], int(fmod(ut, 1.0) * 10), int(srv.get("frame", -1))]
 	if not gnss.is_empty():
 		status.text += "   GNSS %s %.2f m%s" % [gnss.get("fix", "?"), float(gnss.get("hacc", -1)),
 			"  geo %.2f" % float(georef.get("rms", 0)) if georef.get("ok", false) else ""]

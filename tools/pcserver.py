@@ -121,7 +121,7 @@ while True:   # wait for the frame source (arcgrab or replay_shm.py)
 ls = LiveStereo(scale=a.scale, max_depth=a.maxdepth, min_depth=a.min_depth)
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
-last_frame = -1; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
+last_frame = -1; t_frame_status = 0.0; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
 npub = 0
 print(f"pcserver: scale {a.scale} ({ls.size[0]} px), voxel {a.voxel*100:.1f} cm, min frames {a.min_frames}, "
       f"depth {a.min_depth}-{a.maxdepth} m", flush=True)
@@ -139,7 +139,7 @@ def take_still():
 
 def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
-                                 scan=scan, saved=saved, still=still, stills=n_stills))
+                                 scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame))
 
 
 last_fps = 0.0
@@ -184,6 +184,8 @@ try:
         except TimeoutError:
             print("waiting for frames ...", flush=True); continue
         last_frame = mL["frame"]
+        if time.monotonic() - t_frame_status > 0.2:      # HUD frame stamp (arcgrab frame no. = frames.jsonl 'frame')
+            t_frame_status = time.monotonic(); write_status()
         if not mL["pose_valid"] or abs(mL["ts"] - mR["ts"]) > a.pair_tol:
             continue
         t1 = time.monotonic()

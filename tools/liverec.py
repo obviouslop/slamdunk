@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record pose-stamped stereo pairs from /dev/shm/arcgrab (run src/arcgrab concurrently).
 usage: liverec.py OUTDIR [--seconds 30] [--fps 3]
-Writes OUTDIR/NNNNN_{left,right}.y10p (packed RAW10, 2464x2464, stride 3088, BGGR) and
+Writes OUTDIR/NNNNN_{left,right}.y10p (packed RAW10, 2464x2464, stride 3088, RGGB) and
 OUTDIR/frames.jsonl (one line per pair: ts/pose/exposure per camera) + OUTDIR/stream.json."""
 import argparse, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -9,12 +9,12 @@ from arcshm import ArcShm
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--seconds", type=float, default=30); ap.add_argument("--fps", type=float, default=3)
 a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
 s = ArcShm()
-json.dump(dict(line_px=s.line_px, line_bytes=s.line_bytes, black=s.black, bayer="BGGR", cams=["left", "right"],
+json.dump(dict(line_px=s.line_px, line_bytes=s.line_bytes, black=s.black, bayer="RGGB", cams=["left", "right"],
                devices=["/dev/video0 arcimx616 0-001a crop x=550", "/dev/video3 arcimx616 0-0010 crop x=250"]),
           open(os.path.join(a.out, "stream.json"), "w"), indent=1)
 log = open(os.path.join(a.out, "frames.jsonl"), "w"); n = 0; t0 = time.monotonic(); last = -1; dts = []
 # full-rate log of every left frame: metadata + 616x616 green-channel thumbnail (8-bit MSBs sliced
-# straight from the packed RAW10: every 4th row (even -> B/G row), byte 1 of each 5-byte group = G)
+# straight from the packed RAW10: every 4th row (even -> R/G row), byte 1 of each 5-byte group = G)
 import threading, numpy as np
 plog = open(os.path.join(a.out, "poses.jsonl"), "w"); tbin = open(os.path.join(a.out, "thumbs_left.u8"), "wb"); stop = False
 def pose_logger():

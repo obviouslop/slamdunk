@@ -4,7 +4,7 @@
 Layout (see ShmHdr in src/arcgrab.cpp): 4096-byte header, then 2 cameras x 2 slots of packed
 RAW10 (MIPI, 4 px / 5 B) frames, line stride `line_bytes`, `line_px` pixels per line.
 Camera 0 = passthrough_left (/dev/video0), camera 1 = passthrough_right (/dev/video3).
-Bayer pattern BGGR. Seqlock per camera: seq is odd while the writer copies.
+Bayer pattern RGGB. Seqlock per camera: seq is odd while the writer copies.
 
     from arcshm import ArcShm
     s = ArcShm()
@@ -75,14 +75,14 @@ class ArcShm:
         return np.stack([(g[:, :, i] << 2) | ((lo >> (2 * i)) & 3) for i in range(4)], -1).reshape(H, W)
 
     def rgb(self, raw, half=True, wb=None):
-        """BGGR demosaic. half=True: 2x2 binning (fast, half-res). Returns float32 BGR in 0..1."""
+        """RGGB demosaic. half=True: 2x2 binning (fast, half-res). Returns float32 BGR in 0..1."""
         x = np.clip(raw.astype(np.float32) - self.black, 0, None) / (1023 - self.black)
         if half:
-            b = x[0::2, 0::2]; g = (x[0::2, 1::2] + x[1::2, 0::2]) / 2; r = x[1::2, 1::2]
+            r = x[0::2, 0::2]; g = (x[0::2, 1::2] + x[1::2, 0::2]) / 2; b = x[1::2, 1::2]
             img = np.stack([b, g, r], -1)
         else:
             import cv2
-            img = cv2.cvtColor((x * 65535).astype(np.uint16), cv2.COLOR_BayerBG2BGR).astype(np.float32) / 65535  # BGGR
+            img = cv2.cvtColor((x * 65535).astype(np.uint16), cv2.COLOR_BayerBG2BGR).astype(np.float32) / 65535  # RGGB
         if wb is None:
             wb = img.reshape(-1, 3).mean(0); wb = wb.mean() / np.maximum(wb, 1e-6)
         return np.clip(img * wb, 0, 1)

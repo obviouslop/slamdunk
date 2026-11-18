@@ -47,7 +47,7 @@ def lib():
 
 
 def bin_raw10(buf, W=2464, H=2464, stride=3088, skip=0, black=64.0, threads=2):
-    """Packed RAW10 BGGR bytes -> (H/2, W/2, 3) float32 BGR, black removed (== LiveStereo._rgb(unpack(buf)))."""
+    """Packed RAW10 RGGB bytes -> (H/2, W/2, 3) float32 BGR, black removed (== LiveStereo._rgb(unpack(buf)))."""
     a = np.frombuffer(buf, np.uint8)
     assert a.size >= (H + skip) * stride
     out = np.empty((H // 2, W // 2, 3), np.float32)
