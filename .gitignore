@@ -1,0 +1,22 @@
+# large/binary data and build outputs
+captures/
+backup/
+data0.bin
+layout0.bin
+__pycache__/
+*.pyc
+probe/probe
+src/arcgrab
+src/bqdump
+src/devstate
+src/fmtprobe
+src/rvclock
+src/rvcloud
+src/rvrec
+src/rvrec2
+src/rvstat
+build/
+*.so
+# untrusted third-party download (reference only)
+third_party/arcturus_sample/
+viewer/.godot/
