@@ -46,7 +46,7 @@ GODOT=/home/steamos/code/Godot_v4.7.2-stable_linux.arm64
 if [ -n "$RECORD" ] && { [ -e "$RECORD/frames.jsonl" ] || [ -e "$RECORD/hmd_500hz.txt" ]; }; then
   echo "pcsession: $RECORD already contains a recording - choose a new directory (nothing was started)" >&2; exit 1
 fi
-LOG=/tmp/pcsession; mkdir -p "$LOG"
+LOG=captures/logs/pcsession; mkdir -p "$LOG"      # on disk (/tmp is RAM)
 if [ $DEPTH = 1 ]; then printf '[xr]\nopenxr/submit_depth_buffer=true\n' > viewer/override.cfg; else rm -f viewer/override.cfg; fi
 PIDS=()
 cleanup() {

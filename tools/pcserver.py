@@ -37,7 +37,9 @@ ap.add_argument("--min-frames", type=int, default=6, help="frames a surface must
 ap.add_argument("--carve-w", type=float, default=0.3, help="weight of free-space votes (balanced against --back-w)")
 ap.add_argument("--back-k", type=float, default=8.0, help="solid votes up to (1+k) bands behind each measured surface")
 ap.add_argument("--back-w", type=float, default=3.0, help="weight of the solid votes (removes surfaces left behind by drift)")
-ap.add_argument("--no-align", action="store_true", help="disable drift correction (frame-to-map registration)")
+ap.add_argument("--align", action="store_true", help="enable drift correction (frame-to-map registration). Off by default: "
+               "on live15 it moved the map up to 19 cm while SteamVR tracking itself holds ~2-3 cm")
+ap.add_argument("--no-align", action="store_true", help=argparse.SUPPRESS)      # old flag, now the default
 ap.add_argument("--abs-trans", type=float, default=0.08, help="1-sigma of the total drift correction (m)")
 ap.add_argument("--maxdepth", type=float, default=2.5, help="surfaces are only taken up to this distance (m)")
 ap.add_argument("--carve-depth", type=float, default=4.0, help="free-space carving up to this distance (m)")
@@ -230,7 +232,7 @@ try:
             continue
         t2 = time.monotonic()
         with lock:
-            if not a.no_align and n_frames >= 3:
+            if a.align and not a.no_align and n_frames >= 3:
                 Ta, info = ts.align(ls, Z, T, tracking=Tt, abs_trans=a.abs_trans)
                 if Ta is not None:
                     T = Ta; Tc = Ta @ np.linalg.inv(Tt)

@@ -555,3 +555,13 @@ TODO: depth-correct own passthrough (user approved).
 - Viewer: HUD / help / horizon label text updated at 10 Hz instead of every frame (Label3D rebuilds its mesh on each
   text change); pcserver and liverec run with nice 8 so the viewer gets the CPU first (5 cores, pcserver ~1.5).
 - (live14 used the IR passthrough: blue tint in the composited captures.)
+
+## live15: drift correction off by default
+- User: a SteamVR window pinned to the TV moved 2-3 cm while walking around (= tracking limit); the cloud still felt
+  less anchored, fps solid at 72 with depth submitted.
+- Replay of live15 through pcserver: the drift correction (tsdf_align) moved the whole map up to 19 cm vertically and
+  6 cm sideways over the session, back and forth -> the cloud slides against reality while SteamVR content does not.
+- re/live_metric.py on live15 (min_frames 6, carve 0.3, back 8/3): no align bias -0.11 cm, 35.0 % within 3 cm;
+  align bias +0.11 cm, 35.3 % within 3 cm, correction up to 20.5 cm. No accuracy gain -> pcserver --align is now
+  opt-in (default: map frame = STAGE). The earlier "drift" (live7) was most likely the depth bias + passthrough effect.
+- Session logs now in captures/logs/pcsession (was /tmp/pcsession: tmpfs = RAM); scratch outputs in captures/scratch.
