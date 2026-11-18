@@ -490,3 +490,25 @@ Effect: 2 m was ~6 % too far, 0.5-1 m unchanged ("far points too far" in the hea
 Applied in tools/livestereo.py from captures/depth_calib.json (PC_NO_DEPTH_CAL=1 disables). Not yet
 re-verified: ruler check (frames 60-68), floor-ceiling on live9 with the correction, live session.
 TODO: depth-correct own passthrough (user approved).
+
+## 2026-11-18: colour fix, toolbox orientation, HUD stamp, depth-correct passthrough
+- Bayer pattern is RGGB (R at (0,0)), not BGGR: stills were red/blue swapped, and so were the cloud colours
+  (src/raw10.cpp, livestereo._rgb, arcshm, stills). Existing stills re-rendered from their .y10p:
+  `tools/stills.py --regen captures/stills/*` (EXIF kept). Side effect: the grey image for SGBM now uses the right
+  channel weights (slightly different from what the live11 depth calibration was fitted on; re-check d0).
+- Rectified colour: highlights blend to white instead of turning magenta (white balance gains > 1 clipped R/B).
+- Toolbox rigidly attached to the left controller (position + orientation), PAL_OFFSET / PAL_TILT_DEG in pc_main.gd.
+- HUD top line: local time (0.1 s) + arcgrab frame number `fNNNN` (= "frame" in frames.jsonl/poses.jsonl of a
+  recording), to locate composited captures (c_NNNN.jpg, 2 fps, no own timestamps) in the recorded data.
+- Depth-correct passthrough ("DEPTH VIEW" on the toolbox): server tools/ptpub.py -> /dev/shm/pcpass.bin (rectified
+  colour 432^2 + depth grid 107^2 (8x8 block means) + STAGE pose of the exposure), viewer/passthrough.gd displaces a
+  grid mesh in the vertex shader; no-depth cells and depth edges (>8 % jump) are discarded so SteamVR's passthrough shows.
+  Same approach as the stereo mode of Rectus' openxr-steamvr-passthrough (~/code). Rate = stereo rate (~2-3 Hz live),
+  world-locked, so it is correct for static scenes and lags for moving things. pcserver computes depth for it even
+  when scanning is stopped (no fusion then); `--passthrough` publishes always.
+  Purpose on the Frame: the native passthrough already looks depth-correct to the user, so this view is mainly a live
+  check of OUR stereo depth (it is exactly the depth that is fused): where it lines up with reality, depth is right.
+  Tested: format round trip python -> GDScript, CPU unprojection == numpy, replay live11 through pcserver.
+  Not tested: the shader on a GPU (headless Godot has no renderer) -> watch the viewer log for shader errors.
+- Replay test harness: start replay_shm.py and wait for "replaying ..." before pcserver, else the server maps the
+  stale /dev/shm/arcgrab that the replay then truncates -> SIGBUS (this was the earlier "core dump").

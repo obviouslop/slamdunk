@@ -106,7 +106,12 @@ class LiveStereo:
         far = far or self.max_depth
         Z = np.where(disp > 0.5, self.k * self.f * self.baseline / np.maximum(disp + self.d0, 1e-6), 0).astype(np.float32)
         Z[(Z > far) | (Z < self.min_depth)] = 0
-        rgb = np.clip(rc * (wb * s), 0, 255).astype(np.uint8)[:, :, ::-1]
+        x = rc * (wb * s)
+        # highlights: blend towards white where a channel clips (else white-balanced highlights turn magenta),
+        # and force white where the sensor itself saturated
+        x += np.maximum(x.max(-1, keepdims=True) - 255, 0)
+        x[rc.max(-1) > 0.97 * (1023 - 64)] = 255
+        rgb = np.clip(x, 0, 255).astype(np.uint8)[:, :, ::-1]
         return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
 
     def world_from_rect(self, hmd_pose_3x4):

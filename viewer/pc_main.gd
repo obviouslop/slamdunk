@@ -64,6 +64,9 @@ TOOLS
            3 clicks + grip: 4 cm panel (solar panel)
   PATH     clicks + grip: conduit / cable run
 
+DEPTH VIEW (toolbox): camera image drawn on its own measured
+  depth (~3 Hz, world-locked). Where it matches the real world,
+  the depth is right; gaps = no depth (SteamVR view shows).
 Clear cloud / objects / exit: toolbox, press twice.
 Save (toolbox): cloud .ply + objects .json in captures/sessions"""
 
@@ -84,6 +87,7 @@ var reticle: MeshInstance3D
 var ret_mat: StandardMaterial3D
 var palette: Palette
 var pal_holder: Node3D
+var passthrough: DepthPassthrough
 const PAL_OFFSET := Vector3(0.0, 0.09, -0.03)   # in the left controller frame (y up, -z forward)
 const PAL_TILT_DEG := 25.0                         # face tilted up toward the eyes
 var ctrl := {}
@@ -195,6 +199,8 @@ func _build_scene() -> void:
 	mat.set_shader_parameter("alpha", alpha)
 	cloud = CloudTiles.new(mat)
 	origin.add_child(cloud)
+	passthrough = DepthPassthrough.new()      # depth-correct camera view (toolbox: DEPTH VIEW)
+	origin.add_child(passthrough)
 
 	model = SceneModel.new()
 	model.changed.connect(_autosave)
@@ -254,7 +260,8 @@ func _build_scene() -> void:
 	palette.add_button("opacity", "OPACITY", 3, 3)
 	palette.add_button("clear_cloud", "CLEAR CLOUD", 0, 4, "danger")
 	palette.add_button("clear_objects", "CLEAR OBJ.", 1, 4, "danger")
-	palette.add_button("exit", "EXIT", 2, 4, "danger", 2)
+	palette.add_button("pass", "DEPTH VIEW", 2, 4)
+	palette.add_button("exit", "EXIT", 3, 4, "danger")
 	palette.pressed.connect(_on_palette)
 	palette.add_child(help)                      # help + input diagnostics live next to the toolbox
 	var pw := (palette.bg.mesh as QuadMesh).size.x
@@ -514,6 +521,8 @@ func _on_palette(id: String) -> void:
 			model.set_preview("", [], null)
 			_buzz("right_hand", 0.8, 0.15)
 			_say("objects cleared")
+		"pass":
+			_toggle_passthrough()
 		"exit":
 			_exit()
 	_sync_palette()
@@ -528,6 +537,7 @@ func _sync_palette() -> void:
 	palette.set_active("hide", not cloud_shown)
 	palette.set_text("hide", "SHOW CLOUD" if not cloud_shown else "HIDE CLOUD")
 	palette.set_active("help", help.visible)
+	palette.set_active("pass", passthrough.visible)
 	palette.set_title("%s   %s" % [tool.to_upper(), "● REC" if scanning else "■ STOPPED"])
 
 
@@ -701,7 +711,8 @@ func _write_ctl() -> void:
 		for r in range(3):
 			aim.append_array([t.basis.x[r], t.basis.y[r], t.basis.z[r], t.origin[r]])
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
-		"aim": aim, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name}
+		"aim": aim, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
+		"passthrough": passthrough != null and passthrough.visible}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -761,7 +772,16 @@ func _place_palette() -> void:
 	palette.position = Vector3(-size.x * 0.5, size.y * 0.5, 0)
 
 
+func _toggle_passthrough() -> void:
+	passthrough.visible = not passthrough.visible
+	_say("depth view ON: camera image on its measured depth" if passthrough.visible else "depth view off")
+	_write_ctl()
+	_sync_palette()
+
+
 func _process(delta: float) -> void:
+	if passthrough.visible:
+		passthrough.poll()
 	ctl_accum += delta
 	if ctl_accum >= CTL_S:
 		ctl_accum = 0.0

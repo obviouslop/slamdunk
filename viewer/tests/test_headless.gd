@@ -112,7 +112,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 19, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 20, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()
@@ -152,4 +152,17 @@ func _late_b() -> void:
 	inst.call("_on_button", "dpad_up", "left_hand")
 	check(inst.get("scanning") == false, "D-pad up stops scanning")
 	inst.call("_on_button", "dpad_up", "left_hand")
+	# depth passthrough: frame written by tools/ptpub.py (fixture), CPU unprojection == numpy reference
+	var dp: DepthPassthrough = inst.get("passthrough")
+	dp.path = "res://tests/fixtures/pcpass_test.bin"
+	inst.call("_on_palette", "pass")
+	check(dp.visible and ip.buttons["pass"]["active"], "DEPTH VIEW toggles the passthrough")
+	check(dp.poll() and dp.seq == 7 and dp.frame == 4242 and dp.grid == Vector2i(4, 4), "passthrough frame read")
+	check(not dp.poll(), "same seq is not re-read")
+	var cp = dp.cell_point(2, 3)
+	check(cp != null and (cp as Vector3).is_equal_approx(Vector3(1.6, 1.0, -2.2)), "passthrough cell unprojection %s" % [cp])
+	check(dp.cell_point(0, 0) == null, "cell without depth is invalid")
+	check(dp.mesh != null and dp.mesh.get_surface_count() == 1, "passthrough grid mesh built")
+	inst.call("_on_palette", "pass")
+	check(not dp.visible, "DEPTH VIEW off")
 

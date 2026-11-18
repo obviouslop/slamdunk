@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arcshm import ArcShm
 from livestereo import LiveStereo
 from tsdf import TSDF, bin_raw10, cone_pixels
+import ptpub
 import pcpub
 import stills
 
@@ -44,6 +45,7 @@ ap.add_argument("--publish-every", type=float, default=1.0)
 ap.add_argument("--tile", type=float, default=1.0, help="tile size (m) of the published cloud")
 ap.add_argument("--max-pub", type=int, default=300000)
 ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker threads (leave cores for XR)")
+ap.add_argument("--passthrough", action="store_true", help="always publish depth-passthrough frames (else only when the viewer asks)")
 ap.add_argument("--seconds", type=float, default=0, help="stop after N s (0 = run forever)")
 ap.add_argument("--pair-tol", type=float, default=0.015, help="max |ts_L - ts_R| (s)")
 ap.add_argument("--cone", type=float, default=12.0, help="paint-mode cone half angle (deg)")
@@ -121,7 +123,7 @@ while True:   # wait for the frame source (arcgrab or replay_shm.py)
 ls = LiveStereo(scale=a.scale, max_depth=a.maxdepth, min_depth=a.min_depth)
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
-last_frame = -1; t_frame_status = 0.0; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
+last_frame = -1; n_pt = 0; t_frame_status = 0.0; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
 npub = 0
 print(f"pcserver: scale {a.scale} ({ls.size[0]} px), voxel {a.voxel*100:.1f} cm, min frames {a.min_frames}, "
       f"depth {a.min_depth}-{a.maxdepth} m", flush=True)
@@ -172,7 +174,9 @@ try:
         if ctl:
             handle_cmd(ctl)
         painting = bool(ctl and ctl.get("painting") and len(ctl.get("aim") or []) == 12)
-        if scan == "off" or (scan == "paint" and not painting):
+        want_pt = a.passthrough or bool(ctl and ctl.get("passthrough"))
+        fuse = not (scan == "off" or (scan == "paint" and not painting))
+        if not fuse and not want_pt:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if time.monotonic() - t_pub > a.publish_every:
                 t_pub = time.monotonic()
@@ -195,6 +199,11 @@ try:
         Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
         Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
         T = Tc @ Tt                                     # predicted MAP pose
+        if want_pt:                                     # depth-correct passthrough (STAGE frame, raw tracking pose)
+            n_pt += 1
+            ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt))
+        if not fuse:
+            continue
         t2 = time.monotonic()
         with lock:
             if not a.no_align and n_frames >= 3:

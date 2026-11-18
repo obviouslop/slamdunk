@@ -46,7 +46,7 @@ cleanup() {
   echo "session ended; logs in $LOG"
 }
 trap cleanup INT TERM EXIT
-rm -f /dev/shm/pointcloud.bin /dev/shm/pcctl.json /dev/shm/pchit.json /dev/shm/pcstatus.json /dev/shm/gnss.json /dev/shm/georef.json /dev/shm/pcalign.json
+rm -f /dev/shm/pointcloud.bin /dev/shm/pcctl.json /dev/shm/pchit.json /dev/shm/pcstatus.json /dev/shm/gnss.json /dev/shm/georef.json /dev/shm/pcalign.json /dev/shm/pcpass.bin
 
 if [ -n "$REPLAY" ]; then
   $PY -I tools/replay_shm.py "$REPLAY" --loop > "$LOG/replay.log" 2>&1 & PIDS+=($!)
