@@ -20,3 +20,4 @@ build/
 # untrusted third-party download (reference only)
 third_party/arcturus_sample/
 viewer/.godot/
+src/posestream
