@@ -36,12 +36,13 @@ const HZ_PER_DEG := 0.0004   # horizon shift per degree of pitch (m at 0.7 m)
 const HELP_TEXT := """POINT CLOUD PLANNER - HELP (Y: close)
 
 RIGHT HAND (tools)
-  trigger ..... use tool / press toolbox button
+  bumper ...... click: toolbox button / place point
   A ........... undo (last point, else last object)
   B ........... next tool
   X ........... stereo still (pair + pose + time + GNSS)
   Y ........... this help
-  grip/bumper . finish panel (box after 3 points) / path
+  trigger hold  capture where you point (analog)
+  grip ........ finish panel (box after 3 points) / path
   stick ↑↓ .... distance of the free point (orange)
   stick click . snap to scanned surface on/off (green)
 
@@ -55,7 +56,8 @@ LEFT HAND (toolbox above the controller)
 
 TOOLS
   SCAN     fuse everything you look at
-  PAINT    fuse only where you point (hold trigger)
+  PAINT    fuse only where you point (hold trigger);
+           with scanning STOPPED the trigger does this in any tool
   MEASURE  2 clicks: distance, height diff, horizontal
   ANCHOR   1 click: named reference point
   BOX      4 clicks: edge, edge, width, height
@@ -177,7 +179,7 @@ func _build_scene() -> void:
 		tip.modulate = Color(1.0, 0.95, 0.6)
 		tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		tip.position = Vector3(0.09 if hand == "right_hand" else -0.09, -0.02, 0.06)
-		tip.text = "A undo  B next tool\nX still  Y help\ntrigger: use  grip: finish" if hand == "right_hand" \
+		tip.text = "bumper: click  trigger: capture\nA undo  B next tool\nX still  Y help  grip: finish" if hand == "right_hand" \
 			else "D-pad ↑ rec/stop  ↓ hide\n← → point size\nView: toolbox  trigger: peek"
 		tip.visible = false
 		c.add_child(tip)
@@ -210,8 +212,12 @@ func _build_scene() -> void:
 	# minimal HUD: one line high, one or two lines low, artificial horizon next to the top line
 	status = _hud_label(Vector3(0.015, 0.205, -0.7), HORIZONTAL_ALIGNMENT_LEFT)
 	status_low = _hud_label(Vector3(0, -0.215, -0.7), HORIZONTAL_ALIGNMENT_CENTER)
+	status_low.pixel_size = 0.0006
+	status_low.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	status_low.modulate = Color(0.75, 1.0, 0.8, 0.95)
 	horizon = _build_horizon()
-	horizon.position = Vector3(-0.025, 0.205, -0.7)
+	horizon.scale = Vector3(2, 2, 2)
+	horizon.position = Vector3(-0.045, 0.2, -0.7)
 	camera.add_child(horizon)
 
 	help = Label3D.new()
@@ -394,8 +400,8 @@ func _on_button(action: String, hand: String) -> void:
 			"y_button":
 				help_touched = true
 				_show_help(not help.visible)
-			"bumper":
-				_finish()
+			"bumper":                  # the "digital trigger": click (toolbox buttons, place points)
+				_primary()
 			"menu_button":
 				_toggle_palette()
 			"primary_click":
@@ -432,17 +438,24 @@ func _poll_analog() -> void:
 					_analog_released(hand, a)
 
 
+func _primary() -> void:
+	## Right bumper (digital trigger): press the hovered toolbox button, else place a point with the tool.
+	if pal_hit != null:
+		var id := palette.press()
+		_log_input("toolbox press '%s' (hovered '%s')" % [id, palette.hovered])
+		_buzz("right_hand", 0.3 if id != "" else 0.15, 0.03)
+	elif tool in MODELING:
+		_place()
+	elif tool in ["scan", "paint"]:
+		_say("bumper places points in MEASURE / ANCHOR / BOX / PATH; hold the analog trigger to capture")
+
+
 func _analog_pressed(hand: String, a: String) -> void:
 	if hand == "right_hand" and a == "trigger":
-		if pal_hit != null:
-			var id := palette.press()
-			_log_input("toolbox press '%s' (hovered '%s')" % [id, palette.hovered])
-			_buzz("right_hand", 0.3 if id != "" else 0.15, 0.03)
+		if pal_hit != null:                     # also accept the analog trigger on the toolbox
+			_primary()
 			return
-		if tool == "paint":
-			painting = true
-		elif tool in MODELING:
-			_place()
+		painting = true                         # capture where you point (any tool)
 	elif hand == "right_hand" and a == "grip":
 		_finish()
 	elif hand == "left_hand" and a == "trigger":
@@ -669,10 +682,12 @@ func _read_json(path: String) -> Dictionary:
 
 
 func _scan_state() -> String:
-	if not scanning:
+	## auto: fuse everything in view; paint: fuse only the cone around the right aim ray; off.
+	## The analog trigger captures where you point in every tool, also while scanning is stopped.
+	if painting:
+		return "paint" if (tool == "paint" or not scanning) else "auto"
+	if not scanning or tool == "paint":
 		return "off"
-	if tool == "paint":
-		return "paint"
 	return "auto"
 
 
@@ -850,14 +865,14 @@ func _hint() -> String:
 		"paint":
 			return "hold trigger to capture where you point"
 		"measure":
-			return "trigger: %s   A: undo" % ["start point", "end point"][mini(pts.size(), 1)]
+			return "bumper: %s   A: undo" % ["start point", "end point"][mini(pts.size(), 1)]
 		"anchor":
-			return "trigger: place anchor   A: undo"
+			return "bumper: place anchor   A: undo"
 		"box":
 			var steps := ["corner 1", "corner 2 (first edge)", "width (or grip: panel)", "height"]
-			return "trigger: %s   A: undo" % steps[mini(pts.size(), 3)]
+			return "bumper: %s   A: undo" % steps[mini(pts.size(), 3)]
 		"path":
-			return "trigger: add point (%d)   grip: finish   A: undo" % pts.size()
+			return "bumper: add point (%d)   grip: finish   A: undo" % pts.size()
 	return ""
 
 

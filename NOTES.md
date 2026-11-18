@@ -466,3 +466,18 @@ Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answe
   its depth buffer; the compositor has an UpdateReprojectionDepth path).
 * live8 check of the fusion fix (re/live_metric.py): old bias -2.19 cm / 33.7 % within 3 cm, new +1.4 cm /
   36.3 %, fewer points; back_w 3 chosen (live7 +0.39 cm / 39.3 %).
+
+## 2026-11-18 live9 / live10 (--depth) feedback
+* Toolbox works. User prefers the bumper ("digital trigger", what SteamVR menus use) for clicks:
+  bumper = click (toolbox / place points), analog trigger hold = capture where you point (any tool; with
+  scanning stopped this is targeted capture), grip = finish. Horizon x2, low HUD larger. The message in the
+  middle of the view is SteamVR's "Camera enabled outside playspace" toast (not ours; walk inside the
+  playspace bounds or enlarge them).
+* Height: user's MEASURE gave "2.3 m" vs 2.55 m folding rule; the saved measurements M2/M3 read
+  0.83 -> 3.42 / 0.82 -> 3.43 m = 2.59-2.61 m (M1 started 0.5 m above the floor). Drift-free stereo
+  floor-ceiling on live9 (re/floor_ceiling.py): 2.459 m (-3.5 %). Offline fusion of live9 at the M2 spot:
+  old 2.70, new 2.67, new + drift correction 2.58 m -> over a whole session the SteamVR vertical drift
+  separates floor and ceiling observations (ceiling only ~100 points); drift correction recovers part.
+* "Far: points too far, near: points too close" = signature of the passthrough projected at one fixed depth
+  (crossover at the proxy distance); our stereo scale is if anything 1-3 % short, opposite direction.
+* Stills: 6 captured, synced 2.4-5 ms, valid poses, map_from_stage recorded.
