@@ -366,3 +366,52 @@ and reports the app as paused until "Resume" closes the dashboard. Not an app bu
 (close the dashboard during the countdown) would avoid it.
 
 Next in headset: tools/pcsession.sh --record captures/live7 ; try tools; compare judder/parallax.
+
+## 2026-11-18 10:50-12:00: live7 review, depth check, Frame controller UI, stills (offline only)
+User feedback on live7 (5.3 min, 309 pairs): better; floor dots look deeper than the real floor and ceiling
+dots higher than the real ceiling (floor-ceiling measured 2.50 m with a laser). Balcony floor is ~10 cm lower.
+Button layout was wrong: Frame controllers = right: A B X Y, menu; left: D-pad, view (+ trigger, grip,
+bumper, thumbstick, thumbrest on both). Wants in-app help, exit, scan record/stop, no one-press delete,
+stereo stills with pose/time/GNSS, toolbox UI like Open Blocks.
+
+Environment: system python3 cv2 is broken (opencv 4.9 links libavcodec.so.60, ffmpeg is 61). Use
+/home/steamos/playground/.venv/bin/python (pcsession.sh already does).
+
+Depth / scale analysis on live7 (re/depth_bias.py caches per-pixel world rays + disparities):
+* Global depth scale is right: floor-to-ceiling from short time windows (ceiling plane + floor planes
+  within +-5 frames, both relative to the same eye pose, re/floor_ceiling.py): median 2.466 m (n=10,
+  IQR 13 cm) vs 2.50 m laser. A disparity offset of +0.5 px would give 2.37 m, scale 0.95 -> 2.34 m,
+  so neither is supported. Single-frame floor tilt (re/depth_tilt_fit.py) is noisy (median 4 deg), its
+  zero crossing at d0 ~ +0.5 px is not significant and conflicts with the 2.47 m.
+* Fused floor is bimodal (0.95 / 1.05 m STAGE y) and ceiling (3.39 / 3.60): partly real (balcony ~10 cm
+  lower = the deep-blue region in the floor map), partly furniture tops classified as floor; per-frame
+  floor heights at the same place differ by up to 20 cm between start and end of the walk, so some
+  vertical tracking drift is likely but not proven (furniture confounds it).
+* Composited view (2 fps capture) shows the IR passthrough fallback the whole time; viewer at 70-72 fps
+  (judder fix confirmed), server 5-6.7 fused frames/s live.
+=> Remaining "too deep / too high" impression is most likely the passthrough reprojection (SteamVR
+   projects the IR fallback image onto a depth proxy, so surfaces in the passthrough appear at the proxy
+   depth), plus drift for areas scanned earlier. Proposed in-headset test: MEASURE tool from floor to
+   ceiling on the cloud (snap on), and the controller resting on the floor vs. the floor dots
+   (left trigger = peek without the cloud).
+
+Viewer UI rework (headless tests: 26 checks ok):
+* openxr_action_map.tres: native profile /interaction_profiles/valve/frame_controller_valve
+  (XR_VALVE_frame_controller_interaction; Godot 4.7.2 and SteamVR vrclient both know it), new actions
+  x_button y_button dpad_* bumper view_button (generator: viewer/tools_dev/add_frame_profile.py).
+  Without it SteamVR emulated Touch: left X -> D-pad down, left Y -> D-pad left/right/up. The viewer
+  prints the active profile and warns in the HUD if it is not the Frame profile.
+* Trigger/grip handled as analog edges with hysteresis (works with every profile).
+* Right: trigger use tool / press toolbox, A undo, B next tool, X stereo still, Y help, grip/bumper finish,
+  stick distance / snap. Left: toolbox (viewer/palette.gd) floating above the controller facing the eyes,
+  D-pad up scan REC/STOP, down hide cloud, left/right point size, View toolbox on/off, trigger hold =
+  peek (cloud hidden while held), stick = opacity. Help panel + controller tooltips (Y; shown 30 s at start).
+* Toolbox: tools SCAN PAINT MEASURE ANCHOR BOX PATH; UNDO SNAP REC STILL SAVE HELP HIDE SIZE-/+ OPACITY;
+  CLEAR CLOUD / CLEAR OBJ. / EXIT are red and need a second press within 3 s. Grip-hold reset removed.
+* New MEASURE tool / object type (distance, dh, horizontal), exported by scene_export.py and
+  blender_import.py.
+* Tests now use PCVIEW_SESSIONS_DIR (scratch) so they never touch captures/sessions.
+Stills (tools/stills.py, server command "still", right X): newest synced pair -> captures/stills/<time>/
+left/right.jpg (full res, demosaiced, upright: sensors are mounted +-90 deg, EXIF time + subsec + GPS +
+heading + JSON pose), raw .y10p, meta.json (poses for raw and upright images, exposure, GNSS, georef).
+Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answers in pcstatus (still, stills).
