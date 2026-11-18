@@ -183,7 +183,9 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
             "calibration": os.path.relpath(CAL, os.path.dirname(d)),
             "raw": {"width": shm.line_px, "line_bytes": shm.line_bytes, "skip_lines": shm.skip, "black": shm.black,
                     "bayer": "BGGR", "format": "RAW10 packed (MIPI)"},
-            "gnss": gnss, "georef": georef, "lla": lla}
+            "gnss": gnss, "georef": georef, "lla": lla,
+            "map_from_stage": _read_json("/dev/shm/pcalign.json").get("map_from_stage"),
+            "map_note": "the fused cloud / scene objects are in the MAP frame: X_map = map_from_stage (3x4) @ X_stage"}
     for side, m, b, T in (("left", mL, bL, TL), ("right", mR, bR, TR)):
         with open(os.path.join(d, side + ".y10p"), "wb") as f:
             f.write(b)

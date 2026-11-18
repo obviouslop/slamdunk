@@ -26,6 +26,7 @@ const HIT_PATH := "/dev/shm/pchit.json"
 const STATUS_PATH := "/dev/shm/pcstatus.json"
 const GNSS_PATH := "/dev/shm/gnss.json"
 const GEOREF_PATH := "/dev/shm/georef.json"
+const ALIGN_PATH := "/dev/shm/pcalign.json"
 const CTL_S := 1.0 / 30.0
 const TOOLS := ["scan", "paint", "measure", "anchor", "box", "path"]
 const MODELING := ["measure", "anchor", "box", "path"]
@@ -109,6 +110,9 @@ var analog := {}             # hand/action -> pressed state for float-derived bu
 var last_stills := -1
 var still_pending_ms := -1
 var profile := ""
+var map_from_stage := Transform3D.IDENTITY    # drift correction from the server (target)
+var stage_from_map_shown := Transform3D.IDENTITY   # smoothed, applied to cloud + objects
+var align_seq := -1
 
 
 func _ready() -> void:
@@ -485,10 +489,15 @@ func _cursor() -> Variant:
 	return t.origin + dir * free_dist
 
 
+func _to_map(p: Vector3) -> Vector3:
+	return stage_from_map_shown.affine_inverse() * p
+
+
 func _place() -> void:
-	var p = _cursor()
-	if p == null:
+	var c = _cursor()
+	if c == null:
 		return
+	var p := _to_map(c)          # objects are stored in the map frame (same as the saved cloud)
 	_buzz()
 	match tool:
 		"anchor":
@@ -643,6 +652,16 @@ func _process(delta: float) -> void:
 			hit = h
 			hit_seq = int(h["seq"])
 			hit_rx_ms = Time.get_ticks_msec()
+		var al := _read_json(ALIGN_PATH)
+		if not al.is_empty() and int(al.get("seq", -1)) != align_seq and (al.get("map_from_stage", []) as Array).size() == 12:
+			align_seq = int(al["seq"])
+			var m: Array = al["map_from_stage"]
+			map_from_stage = Transform3D(Basis(Vector3(m[0], m[4], m[8]), Vector3(m[1], m[5], m[9]), Vector3(m[2], m[6], m[10])),
+				Vector3(m[3], m[7], m[11]))
+	# the map (cloud + objects) lives in the server's MAP frame; show it through the (smoothed) drift correction
+	stage_from_map_shown = stage_from_map_shown.interpolate_with(map_from_stage.affine_inverse(), clampf(delta * 4.0, 0.0, 1.0))
+	cloud.transform = stage_from_map_shown
+	model.transform = stage_from_map_shown
 	slow_accum += delta
 	if slow_accum >= 0.5:
 		slow_accum = 0.0
@@ -699,7 +718,7 @@ func _process(delta: float) -> void:
 			ret_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.95) if on_surface else Color(1.0, 0.6, 0.1, 0.95)
 			_set_ray("right_hand", (cur - rc.global_transform.origin).length(), Color(0.6, 1.0, 0.6) if on_surface else Color(1.0, 0.7, 0.3))
 			if tool in ["box", "path", "measure"]:
-				model.set_preview(tool, pts, cur)
+				model.set_preview(tool, pts, _to_map(cur))
 		else:
 			reticle.visible = false
 			if tool == "paint":

@@ -51,6 +51,9 @@ inline int ifloor(float v) { int i = int(v); return i - (v < float(i)); }
 
 struct Map {
     float vox, tmin, tmax, wmax;
+    float back_k = 0.f;     // >0: voxels behind the surface by (1, 1+back_k] bands get a 'solid' vote (-1)
+    float back_w = 0.5f;    //     with this weight (removes stale back copies left by pose drift)
+    float carve_w = 1.f;    // weight of a free-space vote
     int threads = 3;
     std::unordered_map<uint64_t, int> index;   // block key -> block number
     std::vector<uint64_t> keys;                // block number -> key
@@ -77,6 +80,12 @@ struct Map {
 }  // namespace
 
 extern "C" {
+
+// key: 0 = back_k, 1 = back_w, 2 = carve_w
+void tsdf_set(void* p, int key, float val) {
+    Map* m = static_cast<Map*>(p);
+    if (key == 0) m->back_k = val; else if (key == 1) m->back_w = val; else if (key == 2) m->carve_w = val;
+}
 
 void* tsdf_new(float voxel, float trunc_min, float trunc_max, float wmax, int threads) {
     Map* m = new Map(); m->vox = voxel; m->tmin = trunc_min; m->tmax = trunc_max; m->wmax = wmax; m->threads = threads;
@@ -181,10 +190,15 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
                     if (sd > bd) {                          // free space
                         float zc = Zmin[pi];
                         if (!(zc > 0.f) || pc[2] > carve_depth || (zc - pc[2]) * dn <= band(zc)) continue;
-                        obs = 1.f; wo = 1.f;
+                        obs = 1.f; wo = m->carve_w;
                     } else if (sd >= -bd) {                 // inside the band
                         if (zm > max_depth || (mask && !mask[pi])) continue;
                         obs = sd / bd; wo = std::min(1.f, 1.f / (zm * zm)); surf = true;
+                    } else if (m->back_k > 0.f && sd >= -bd * (1.f + m->back_k) && zm <= max_depth && !(mask && !mask[pi])) {
+                        // just behind the measured surface: solid. Only touches voxels that currently claim to be on
+                        // the free side, so a real surface further back (seen by other views) is not eroded.
+                        if (vx.wq == 0 || vx.tsdf() <= 0.f) continue;
+                        obs = -1.f; wo = m->back_w * std::min(1.f, 1.f / (zm * zm));
                     } else {
                         continue;                           // occluded
                     }
@@ -308,6 +322,149 @@ void tsdf_get(void* p, float* xyz, uint8_t* rgb, float* w) {
     std::memcpy(xyz, m->out_xyz.data(), m->out_xyz.size() * sizeof(float));
     std::memcpy(rgb, m->out_rgb.data(), m->out_rgb.size());
     if (w) std::memcpy(w, m->out_w.data(), m->out_w.size() * sizeof(float));
+}
+
+// ---------------------------------------------------------------- drift correction (frame-to-model)
+// Trilinear TSDF sample at world point (x,y,z): value (normalised, -1..1) and gradient (per metre).
+// Returns false unless all 8 neighbours were observed as surface >= min_nsurf times.
+static bool sample(const Map* m, float x, float y, float z, int min_nsurf, float& val, float g[3]) {
+    const float v = m->vox;
+    float qx = x / v - 0.5f, qy = y / v - 0.5f, qz = z / v - 0.5f;
+    int ix = ifloor(qx), iy = ifloor(qy), iz = ifloor(qz);
+    float fx = qx - ix, fy = qy - iy, fz = qz - iz;
+    float c[8];
+    for (int k = 0; k < 8; k++) {
+        const Voxel* q = m->find_voxel(ix + (k & 1), iy + ((k >> 1) & 1), iz + ((k >> 2) & 1));
+        if (!q || q->wq == 0 || q->nsurf < min_nsurf) return false;
+        c[k] = q->tsdf();
+    }
+    auto L = [](float a, float b, float t) { return a + (b - a) * t; };
+    float c00 = L(c[0], c[1], fx), c10 = L(c[2], c[3], fx), c01 = L(c[4], c[5], fx), c11 = L(c[6], c[7], fx);
+    float c0 = L(c00, c10, fy), c1 = L(c01, c11, fy);
+    val = L(c0, c1, fz);
+    // gradient
+    float dx0 = L(c[1] - c[0], c[3] - c[2], fy), dx1 = L(c[5] - c[4], c[7] - c[6], fy);
+    g[0] = L(dx0, dx1, fz) / v;
+    float dy0 = L(c[2] - c[0], c[3] - c[1], fx), dy1 = L(c[6] - c[4], c[7] - c[5], fx);
+    g[1] = L(dy0, dy1, fz) / v;
+    g[2] = (c1 - c0) / v;
+    return true;
+}
+
+static void solve6(double A[36], double b[6], double x[6]) {   // Gaussian elimination with partial pivoting
+    double M[6][7];
+    for (int i = 0; i < 6; i++) { for (int j = 0; j < 6; j++) M[i][j] = A[i * 6 + j]; M[i][6] = b[i]; }
+    for (int c = 0; c < 6; c++) {
+        int p = c; for (int r = c + 1; r < 6; r++) if (std::fabs(M[r][c]) > std::fabs(M[p][c])) p = r;
+        for (int j = 0; j < 7; j++) std::swap(M[c][j], M[p][j]);
+        if (std::fabs(M[c][c]) < 1e-12) { for (int i = 0; i < 6; i++) x[i] = 0; return; }
+        for (int r = c + 1; r < 6; r++) { double f = M[r][c] / M[c][c]; for (int j = c; j < 7; j++) M[r][j] -= f * M[c][j]; }
+    }
+    for (int i = 5; i >= 0; i--) { double s = M[i][6]; for (int j = i + 1; j < 6; j++) s -= M[i][j] * x[j]; x[i] = s / M[i][i]; }
+}
+
+// Align a depth frame to the map: refine world_from_rect T (3x4 row-major doubles, in/out) by Gauss-Newton on the
+// TSDF (point-to-implicit-surface, Huber), damped towards zero motion (prior_rot rad, prior_trans m = 1-sigma).
+// out[0] = number of residuals used, out[1] = rms residual (m) after, out[2] = |rotation| (rad), out[3] = |translation| (m)
+// Returns 1 if T was updated.
+int tsdf_align(void* p, const float* Z, int W, int H, float f, float cx, float cy, double* T, float fB, float sigma_disp,
+               float max_depth, int stride, int iters, int min_nsurf, float prior_rot, float prior_trans,
+               const double* Tp, float abs_rot, float abs_trans, float* out) {
+    // Tp (3x4, optional): raw tracking pose; total correction relative to it is pulled to zero with 1-sigma
+    // abs_rot (yaw, rad) / abs_trans (m), so a small systematic bias cannot make the map creep.
+    Map* m = static_cast<Map*>(p);
+    std::vector<float> P; P.reserve(size_t(W / stride + 1) * (H / stride + 1) * 4);
+    for (int y = 0; y < H; y += stride)
+        for (int x = 0; x < W; x += stride) {
+            float z = Z[y * W + x];
+            if (!(z > 0.f) || z > max_depth) continue;
+            float s = z * z / fB * sigma_disp, bd = std::min(m->tmax, std::max(m->tmin, 3.f * s));
+            P.push_back((x - cx) / f * z); P.push_back((y - cy) / f * z); P.push_back(z); P.push_back(bd);
+        }
+    size_t n = P.size() / 4;
+    double R[9], t[3];
+    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) R[i * 3 + j] = T[i * 4 + j]; t[i] = T[i * 4 + 3]; }
+    double tot_w[3] = {0, 0, 0}, tot_v[3] = {0, 0, 0};   // accumulated rotation vector / translation
+    double off_v[3] = {0, 0, 0}, off_yaw = 0;           // start pose minus tracking pose (camera centre, yaw)
+    if (Tp) {
+        for (int i = 0; i < 3; i++) off_v[i] = t[i] - Tp[i * 4 + 3];
+        // yaw of R Rp^T about world y: from its (0,2)/(2,2)... use the x-z part of the rotated forward axis
+        double a = 0, c = 0;   // sum over axes of sin/cos of the yaw difference
+        for (int k = 0; k < 3; k++) {
+            double ux = R[0 * 3 + k], uz = R[2 * 3 + k], px = Tp[0 * 4 + k], pz = Tp[2 * 4 + k];
+            a += pz * ux - px * uz; c += px * ux + pz * uz;
+        }
+        off_yaw = std::atan2(a, c);
+    }
+    int used = 0; double rms = 0;
+    for (int it = 0; it < iters; it++) {
+        double A[36] = {0}, b[6] = {0}, sr = 0; int cnt = 0;
+#ifdef _OPENMP
+        omp_set_num_threads(m->threads);
+#endif
+#pragma omp parallel
+        {
+            double Al[36] = {0}, bl[6] = {0}, srl = 0; int cl = 0;
+#pragma omp for schedule(static)
+            for (long k = 0; k < long(n); k++) {
+                const float* q = &P[k * 4];
+                double pw[3], pc[3];
+                for (int i = 0; i < 3; i++) pw[i] = R[i * 3] * q[0] + R[i * 3 + 1] * q[1] + R[i * 3 + 2] * q[2] + t[i];
+                float val, g[3];
+                if (!sample(m, float(pw[0]), float(pw[1]), float(pw[2]), min_nsurf, val, g)) continue;
+                if (std::fabs(val) > 0.9f) continue;                 // saturated: outside the band
+                double bd = q[3];
+                double r = val * bd;                                  // metric residual (approx.)
+                double gm[3] = {g[0] * bd, g[1] * bd, g[2] * bd};     // metric gradient (~unit normal)
+                double gn = std::sqrt(gm[0] * gm[0] + gm[1] * gm[1] + gm[2] * gm[2]);
+                if (gn < 0.3 || gn > 3.0) continue;
+                for (int i = 0; i < 3; i++) pc[i] = pw[i] - t[i];    // relative to the camera centre
+                double J[6] = {pc[1] * gm[2] - pc[2] * gm[1], pc[2] * gm[0] - pc[0] * gm[2], pc[0] * gm[1] - pc[1] * gm[0], gm[0], gm[1], gm[2]};
+                double hub = 0.02, w = std::fabs(r) < hub ? 1.0 : hub / std::fabs(r);
+                w /= (q[2] * q[2]);                                   // depth noise ~ Z^2
+                for (int i = 0; i < 6; i++) { bl[i] -= w * J[i] * r; for (int j = 0; j < 6; j++) Al[i * 6 + j] += w * J[i] * J[j]; }
+                srl += r * r; cl++;
+            }
+#pragma omp critical
+            { for (int i = 0; i < 36; i++) A[i] += Al[i]; for (int i = 0; i < 6; i++) b[i] += bl[i]; sr += srl; cnt += cl; }
+        }
+        used = cnt; rms = cnt ? std::sqrt(sr / cnt) : 0;
+        if (cnt < 200) return 0;
+        // prior: total motion ~ N(0, prior); normalise by the data scale so it acts like `cnt` pseudo-observations
+        double scale = 0; for (int i = 0; i < 6; i++) scale += A[i * 6 + i]; scale /= 6.0;
+        for (int i = 0; i < 3; i++) {
+            double lr = scale * 1e-4 / (prior_rot * prior_rot), lt = scale * 1e-4 / (prior_trans * prior_trans);
+            A[i * 6 + i] += lr; b[i] -= lr * tot_w[i];
+            A[(i + 3) * 6 + i + 3] += lt; b[i + 3] -= lt * tot_v[i];
+        }
+        if (Tp) {
+            double la = scale * 1e-4 / (abs_trans * abs_trans), lr = scale * 1e-4 / (abs_rot * abs_rot);
+            for (int i = 0; i < 3; i++) { A[(i + 3) * 6 + i + 3] += la; b[i + 3] -= la * (tot_v[i] + off_v[i]); }
+            A[1 * 6 + 1] += lr; b[1] -= lr * (tot_w[1] + off_yaw);
+        }
+        // gravity is known from tracking: no roll/pitch correction (4 DoF: yaw about world y + translation)
+        A[0 * 6 + 0] += scale * 1e6; A[2 * 6 + 2] += scale * 1e6;
+        double x[6]; solve6(A, b, x);
+        // apply: p' = Rw (p - t) + t + v  ->  R <- Rw R,  t <- t + v
+        double th = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+        double Rw[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        if (th > 1e-12) {
+            double k[3] = {x[0] / th, x[1] / th, x[2] / th}, c = std::cos(th), s = std::sin(th), C = 1 - c;
+            Rw[0] = c + k[0] * k[0] * C; Rw[1] = k[0] * k[1] * C - k[2] * s; Rw[2] = k[0] * k[2] * C + k[1] * s;
+            Rw[3] = k[1] * k[0] * C + k[2] * s; Rw[4] = c + k[1] * k[1] * C; Rw[5] = k[1] * k[2] * C - k[0] * s;
+            Rw[6] = k[2] * k[0] * C - k[1] * s; Rw[7] = k[2] * k[1] * C + k[0] * s; Rw[8] = c + k[2] * k[2] * C;
+        }
+        double Rn[9];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Rn[i * 3 + j] = Rw[i * 3] * R[j] + Rw[i * 3 + 1] * R[3 + j] + Rw[i * 3 + 2] * R[6 + j];
+        std::memcpy(R, Rn, sizeof R);
+        for (int i = 0; i < 3; i++) { t[i] += x[3 + i]; tot_w[i] += x[i]; tot_v[i] += x[3 + i]; }
+        if (th < 1e-5 && std::sqrt(x[3] * x[3] + x[4] * x[4] + x[5] * x[5]) < 1e-5) break;
+    }
+    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) T[i * 4 + j] = R[i * 3 + j]; T[i * 4 + 3] = t[i]; }
+    out[0] = float(used); out[1] = float(rms);
+    out[2] = float(std::sqrt(tot_w[0] * tot_w[0] + tot_w[1] * tot_w[1] + tot_w[2] * tot_w[2]));
+    out[3] = float(std::sqrt(tot_v[0] * tot_v[0] + tot_v[1] * tot_v[1] + tot_v[2] * tot_v[2]));
+    return 1;
 }
 
 }  // extern "C"

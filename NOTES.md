@@ -415,3 +415,34 @@ Stills (tools/stills.py, server command "still", right X): newest synced pair ->
 left/right.jpg (full res, demosaiced, upright: sensors are mounted +-90 deg, EXIF time + subsec + GPS +
 heading + JSON pose), raw .y10p, meta.json (poses for raw and upright images, exposure, GNSS, georef).
 Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answers in pcstatus (still, stills).
+
+### 12:00-13:30: the "points too deep" bias found and fixed (live7, offline)
+* Hold-out bias meter (re/holdout_bias.py): TSDF cloud lay 3-3.5 cm BEHIND the surfaces measured by unused
+  frames, raw single-frame stereo only -0.6 cm. Single frame fused alone: 0.0 cm -> integration/extraction fine.
+  Bias grows with the time span fused (+-4 s ~0, +-60 s -1.8, whole session -3.5 cm) and the aligner
+  (below) shows the map ~2 cm below new frames even in the first minute.
+* Mechanism: real data has small pose/calibration inconsistencies (cm, ~1 deg) and tracking drift, which
+  thicken every surface. Free-space carving (weight 1) deletes the copies in FRONT, nothing ever touched
+  the copies BEHIND (occluded voxels were skipped) -> surviving surface systematically too far away
+  = "floor too deep, ceiling too high". Synthetic noise alone (re/tsdf_synth.py) does not show it.
+* Fix in src/tsdf.cpp (tsdf_set / TSDF(carve_w, back_k, back_w)): voxels up to (1+back_k) bands behind
+  a measured surface that still claim "free" get a solid vote (-1, weight back_w/Z^2), and free-space
+  votes are down-weighted (carve_w). Bias meter (re/align_bias.py, 80 frames): -3.0 -> -0.1..-0.3 cm.
+  Chosen: carve_w 0.3, back_k 8, back_w 6, min_frames 6 (was 4).
+  Whole-session hold-out: bias -3.47 -> -0.45 cm, consistent(|r|<2) 36.9 -> 42.0 %, outside +-3 sigma
+  50.3 -> 43.2 % (front 5.1 -> 14.0, behind 45.2 -> 29.2; the old low "floater" figure was partly the 3 cm
+  shift), points 242k -> 212k.
+* Drift correction: tsdf_align = frame-to-map registration (Gauss-Newton on the trilinear TSDF, Huber,
+  4 DoF: yaw + translation, gravity kept; damped per frame and pulled towards the raw tracking pose with
+  1-sigma abs_trans 8 cm so it cannot creep). 2.7 ms/frame, aligns ~80 % of frames (rest = new areas).
+  With the OLD fusion it crept 0.4-1.1 m downwards (bias feedback) -> only usable with the balanced fusion.
+* User-facing metric (re/live_metric.py: map as of time k vs depth at frame k, correction from frames < k):
+     old:                         bias -2.40 cm, within 3 cm 30.6 %, 176k points
+     balanced fusion:             bias +0.82 cm, within 3 cm 35.1 %, 104k points
+     balanced + drift correction: bias +0.55 cm, within 3 cm 38.3 %, 105k points, correction <= 10 cm
+* Live pipeline: pcserver keeps the map in a MAP frame, publishes map_from_stage in /dev/shm/pcalign.json
+  per frame; raycast/paint aim transformed; viewer shows cloud + objects through the smoothed inverse, new
+  objects stored in map coordinates (= saved PLY frame). Stills record map_from_stage.
+  Limitations: the correction restarts at identity with each server start (autosaved objects can be off by
+  the previous session's correction, <~10 cm); gnssd georef is fitted in STAGE (error <= the correction).
+  --no-align disables it. Replay test: 302 frames, final correction 3 cm, yaw 0.05 deg.

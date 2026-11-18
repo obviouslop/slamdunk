@@ -10,6 +10,9 @@ Viewer interface (all in /dev/shm, JSON, written atomically):
   pcctl.json    viewer -> server, 10-30 Hz: {t_ms, scan: auto|paint|off, painting, aim[12], cmd, cmd_seq, name}
   pchit.json    server -> viewer, 30 Hz: first TSDF surface along the right controller aim ray
                 {seq, hit, dist, p[3], n[3]}   (picking for anchors / boxes / paths)
+  pcalign.json  server -> viewer, per fused frame: {seq, map_from_stage[12] (3x4 row-major)}: drift correction.
+                The map (cloud, raycast hits, saved PLY) lives in the MAP frame; the viewer shows it through
+                stage_from_map = inverse(map_from_stage) so old scans follow tracking drift.
   pcstatus.json server -> viewer, 1 Hz: {fps, points, blocks, scan, saved, still, stills}
   commands (cmd + incremented cmd_seq): reset | save (name) | still (stereo still -> captures/stills/, tools/stills.py)
 
@@ -28,7 +31,12 @@ import stills
 ap = argparse.ArgumentParser()
 ap.add_argument("--scale", type=float, default=0.35)
 ap.add_argument("--voxel", type=float, default=0.02)
-ap.add_argument("--min-frames", type=int, default=4, help="frames a surface must be seen in before it is shown")
+ap.add_argument("--min-frames", type=int, default=6, help="frames a surface must be seen in before it is shown")
+ap.add_argument("--carve-w", type=float, default=0.3, help="weight of free-space votes (balanced against --back-w)")
+ap.add_argument("--back-k", type=float, default=8.0, help="solid votes up to (1+k) bands behind each measured surface")
+ap.add_argument("--back-w", type=float, default=6.0, help="weight of the solid votes (removes surfaces left behind by drift)")
+ap.add_argument("--no-align", action="store_true", help="disable drift correction (frame-to-map registration)")
+ap.add_argument("--abs-trans", type=float, default=0.08, help="1-sigma of the total drift correction (m)")
 ap.add_argument("--maxdepth", type=float, default=2.5, help="surfaces are only taken up to this distance (m)")
 ap.add_argument("--carve-depth", type=float, default=4.0, help="free-space carving up to this distance (m)")
 ap.add_argument("--min-depth", type=float, default=0.35)
@@ -43,6 +51,7 @@ a = ap.parse_args()
 
 SHM = "/dev/shm"
 CTL_PATH, HIT_PATH, STATUS_PATH = f"{SHM}/pcctl.json", f"{SHM}/pchit.json", f"{SHM}/pcstatus.json"
+ALIGN_PATH = f"{SHM}/pcalign.json"
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "sessions")
 cv2.setNumThreads(a.threads)
 
@@ -66,7 +75,22 @@ def read_ctl():
 
 
 lock = threading.Lock()
-ts = TSDF(voxel=a.voxel, max_depth=a.maxdepth, carve_depth=a.carve_depth, threads=a.threads)
+ts = TSDF(voxel=a.voxel, max_depth=a.maxdepth, carve_depth=a.carve_depth, threads=a.threads,
+          carve_w=a.carve_w, back_k=a.back_k, back_w=a.back_w)
+Tc = np.eye(4)            # map_from_stage drift correction
+align_seq = 0
+
+
+def write_align():
+    global align_seq
+    align_seq += 1
+    try: write_json(ALIGN_PATH, {"seq": align_seq, "map_from_stage": Tc[:3, :4].ravel().round(6).tolist()})
+    except OSError: pass
+
+
+def to_map(A34):
+    """3x4 STAGE pose/aim -> MAP frame"""
+    M = np.eye(4); M[:3, :4] = np.asarray(A34, float).reshape(3, 4); return (Tc @ M)[:3, :4]
 stop = False
 
 
@@ -79,13 +103,14 @@ def pick_loop():
         if not ctl or len(ctl.get("aim") or []) != 12 or ctl.get("t_ms") == last_t:
             continue
         last_t = ctl.get("t_ms")
-        A = np.asarray(ctl["aim"], float).reshape(3, 4)
+        A = to_map(ctl["aim"])
         with lock:
             h = ts.raycast(A[:, 3], -A[:, 2], tmin=0.05, tmax=8.0, min_frames=max(2, a.min_frames - 1))
         seq += 1
         d = {"seq": seq, "aim_t_ms": last_t, "hit": h is not None}
         if h is not None:
-            d.update(p=h[0].tolist(), n=h[1].tolist(), dist=h[2])
+            Ti = np.linalg.inv(Tc)                       # report in STAGE (dist is frame independent)
+            d.update(p=(Ti[:3, :3] @ h[0] + Ti[:3, 3]).tolist(), n=(Ti[:3, :3] @ h[1]).tolist(), dist=h[2])
         try: write_json(HIT_PATH, d)
         except OSError: pass
 
@@ -121,13 +146,14 @@ last_fps = 0.0
 
 
 def handle_cmd(ctl):
-    global last_cmd_seq, saved
+    global last_cmd_seq, saved, Tc
     if ctl.get("cmd_seq") == last_cmd_seq:
         return
     if last_cmd_seq is not None:
         c = ctl.get("cmd")
         if c == "reset":
-            with lock: ts.reset()
+            with lock: ts.reset(); Tc = np.eye(4)
+            write_align()
             print("map reset", flush=True)
         elif c == "save":
             name = os.path.basename(ctl.get("name") or time.strftime("scan_%Y%m%d_%H%M%S"))
@@ -165,11 +191,17 @@ try:
         H = (min(len(bL), len(bR)) // s.line_bytes) - s.skip
         cL = bin_raw10(bL, H=min(H, s.line_px), **kw); cR = bin_raw10(bR, H=min(H, s.line_px), **kw)
         Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
-        T = ls.world_from_rect(mL["pose"])
-        mask = cone_pixels(ls, Z, T, ctl["aim"], a.cone) if scan == "paint" else None
+        Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
+        T = Tc @ Tt                                     # predicted MAP pose
         t2 = time.monotonic()
         with lock:
+            if not a.no_align and n_frames >= 3:
+                Ta, info = ts.align(ls, Z, T, tracking=Tt, abs_trans=a.abs_trans)
+                if Ta is not None:
+                    T = Ta; Tc = Ta @ np.linalg.inv(Tt)
+            mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
             ts.integrate(ls, Z, rgb, T, mask=mask)
+        write_align()
         n_frames += 1; tst.append(t2 - t1); tfu.append(time.monotonic() - t2); t_fr.append(time.monotonic())
         if time.monotonic() - t_pub > a.publish_every:
             t_pub = time.monotonic()
