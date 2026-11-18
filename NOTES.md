@@ -481,3 +481,12 @@ Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answe
 * "Far: points too far, near: points too close" = signature of the passthrough projected at one fixed depth
   (crossover at the proxy distance); our stereo scale is if anything 1-3 % short, opposite direction.
 * Stills: 6 captured, synced 2.4-5 ms, valid poses, map_from_stage recorded.
+
+## 2026-11-18 live11 table calibration
+Dining table: top 1.40 x 0.90 m, 0.755 m above the floor (folding rule 620 mm on top). re/table_calib.py
+(single frames, floor + table-top planes): height 0.801 m median over ~60 frames (+6 %) -> depth spread
+too large = disparity offset. Fit Z = k fB/(disp + d0): k 1.031, d0 +1.0 px (scale 0.35) -> height 0.756.
+Effect: 2 m was ~6 % too far, 0.5-1 m unchanged ("far points too far" in the headset).
+Applied in tools/livestereo.py from captures/depth_calib.json (PC_NO_DEPTH_CAL=1 disables). Not yet
+re-verified: ruler check (frames 60-68), floor-ceiling on live9 with the correction, live session.
+TODO: depth-correct own passthrough (user approved).

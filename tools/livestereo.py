@@ -17,6 +17,7 @@ import numpy as np, cv2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAL = os.path.join(HERE, "..", "captures", "arcturus_calib.json")
+DEPTH_CAL = os.path.join(HERE, "..", "captures", "depth_calib.json")   # Z = k * f B / (disp + d0), re/table_calib.py
 
 
 def _kd(c):
@@ -62,6 +63,9 @@ class LiveStereo:
         self.left_first = P2[0, 3] < 0       # camL is the left image of the rectified pair
         nd = 16 * int(np.ceil(self.f * self.baseline / min_depth / 16))
         self.median = median
+        self.d0, self.k = 0.0, 1.0
+        if os.path.exists(DEPTH_CAL) and not os.environ.get("PC_NO_DEPTH_CAL"):
+            dc = json.load(open(DEPTH_CAL)); self.d0 = float(dc["disp_offset_px"]) * scale / dc.get("valid_for_scale", scale); self.k = float(dc["depth_scale"])
         self.sgbm = cv2.StereoSGBM_create(minDisparity=0, numDisparities=nd, blockSize=block,
                                           P1=int(8 * block * block * pscale), P2=int(32 * block * block * pscale),
                                           uniquenessRatio=uniq, speckleWindowSize=100, speckleRange=2, disp12MaxDiff=1,
@@ -100,7 +104,7 @@ class LiveStereo:
               RGB uint8 rectified colour, disp"""
         disp, rc, wb, s = self.rectified(rawL, rawR, half=half)
         far = far or self.max_depth
-        Z = np.where(disp > 0.5, self.f * self.baseline / np.maximum(disp, 1e-6), 0).astype(np.float32)
+        Z = np.where(disp > 0.5, self.k * self.f * self.baseline / np.maximum(disp + self.d0, 1e-6), 0).astype(np.float32)
         Z[(Z > far) | (Z < self.min_depth)] = 0
         rgb = np.clip(rc * (wb * s), 0, 255).astype(np.uint8)[:, :, ::-1]
         return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
@@ -112,7 +116,7 @@ class LiveStereo:
 
     def points(self, rawL, rawR, wb=None):
         disp, rc, wb, s = self.rectified(rawL, rawR, wb)
-        Z = self.f * self.baseline / np.maximum(disp, 1e-6)
+        Z = self.k * self.f * self.baseline / np.maximum(disp + self.d0, 1e-6)
         ok = (disp > 0.5) & (Z < self.max_depth) & (Z > self.min_depth)
         if self.edge_rel > 0:   # flying pixels at depth discontinuities = most of the "spray" along view rays
             Zv = np.where(ok, Z, np.nan).astype(np.float32)
