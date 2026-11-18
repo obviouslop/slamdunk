@@ -75,9 +75,10 @@ class LiveStereo:
         b = r[0::2, 0::2]; g = (r[0::2, 1::2] + r[1::2, 0::2]) * 0.5; rr = r[1::2, 1::2]
         return np.clip(np.stack([b, g, rr], -1) - 64, 0, None)
 
-    def rectified(self, rawL, rawR, wb=None):
-        """-> disp (rectified camL view, px), colour (rectified, BGR float in raw units), wb, s (gain to 0..255)"""
-        cL, cR = self._rgb(rawL), self._rgb(rawR)
+    def rectified(self, rawL, rawR, wb=None, half=False):
+        """-> disp (rectified camL view, px), colour (rectified, BGR float in raw units), wb, s (gain to 0..255)
+        rawL/rawR: uint16 mosaics, or (half=True) already binned half-res BGR float (tsdf.bin_raw10)"""
+        cL, cR = (rawL, rawR) if half else (self._rgb(rawL), self._rgb(rawR))
         if wb is None:
             m = cL.reshape(-1, 3).mean(0); wb = m.mean() / np.maximum(m, 1e-6)
         gL = cv2.cvtColor(cL, cv2.COLOR_BGR2GRAY); gR = cv2.cvtColor(cR, cv2.COLOR_BGR2GRAY)
@@ -94,10 +95,10 @@ class LiveStereo:
             disp = np.where(np.abs(dm - disp) < 1.0, disp, -1)
         return disp, rc, wb, s
 
-    def depth(self, rawL, rawR, far=None):
+    def depth(self, rawL, rawR, far=None, half=False):
         """-> Z (rectified camL view, metres along the optical axis, 0 = invalid, valid up to `far`),
               RGB uint8 rectified colour, disp"""
-        disp, rc, wb, s = self.rectified(rawL, rawR)
+        disp, rc, wb, s = self.rectified(rawL, rawR, half=half)
         far = far or self.max_depth
         Z = np.where(disp > 0.5, self.f * self.baseline / np.maximum(disp, 1e-6), 0).astype(np.float32)
         Z[(Z > far) | (Z < self.min_depth)] = 0

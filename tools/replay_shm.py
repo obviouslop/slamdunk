@@ -2,16 +2,17 @@
 """Replay a live recording (tools/liverec.py) into /dev/shm/arcgrab, in arcgrab's format, so the
 live pipeline (pcserver.py) and viewer can be developed without touching the cameras.
 
-Poses: from the recording's 500 Hz history (hmd_500hz.txt) at the frame's corrected mid-exposure
-time (t_mid_recorded + delta; delta=-0.340 for recordings made before the V4L2 timestamp fix).
+Poses: the per-frame poses recorded by arcgrab (default), or with --delta from the recording's 500 Hz
+history (hmd_500hz.txt) at the frame's mid-exposure time + delta (use --delta -0.340 for recordings
+made before the V4L2 timestamp fix: liverec1-3, delay1/2).
 
-usage: replay_shm.py RECDIR [--delta -0.340] [--speed 1.0] [--loop]
+usage: replay_shm.py RECDIR [--delta S] [--speed 1.0] [--loop]
 """
 import argparse, json, mmap, os, struct, sys, time
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot, Slerp
 
-ap = argparse.ArgumentParser(); ap.add_argument("rec"); ap.add_argument("--delta", type=float, default=-0.340)
+ap = argparse.ArgumentParser(); ap.add_argument("rec"); ap.add_argument("--delta", type=float, default=None)
 ap.add_argument("--speed", type=float, default=1.0); ap.add_argument("--loop", action="store_true")
 a = ap.parse_args()
 LT = 4.36e-6
@@ -43,7 +44,11 @@ while True:
         for k, name in ((0, "left"), (1, "right")):
             meta = r[name]; tmid = meta["ts"] - 2464 * LT / 2 - meta["exp_lines"] * LT / 2
             buf = open(os.path.join(a.rec, f"{r['i']:05d}_{name}.y10p"), "rb").read()
-            publish(k, buf, meta, pose_at(tmid + a.delta))
+            if a.delta is None and meta.get("pose_valid") and "pose" in meta:
+                pose = np.asarray(meta["pose"], np.float32)
+            else:
+                pose = pose_at(tmid + (a.delta if a.delta is not None else -0.340))
+            publish(k, buf, meta, pose)
     if not a.loop:
         break
 print("replay done")

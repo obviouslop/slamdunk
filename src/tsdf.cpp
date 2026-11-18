@@ -274,6 +274,35 @@ int tsdf_gc(void* p, int min_age, int min_nsurf) {
     return removed;
 }
 
+// First surface crossing (free -> occupied) along a ray from o in direction d (unit), within [tmin, tmax].
+// out[0..2] = point, out[3..5] = outward normal (towards free space), out[6] = distance. Returns 1 on hit.
+int tsdf_raycast(void* p, const float* o, const float* d, float tmin, float tmax, int min_frames, float* out) {
+    Map* m = static_cast<Map*>(p);
+    const float v = m->vox, step = 0.5f * v;
+    auto at = [&](float x, float y, float z) { return m->find_voxel(ifloor(x / v), ifloor(y / v), ifloor(z / v)); };
+    float tprev = -1.f, sprev = 0.f;
+    for (float t = tmin; t <= tmax; t += step) {
+        float x = o[0] + d[0] * t, y = o[1] + d[1] * t, z = o[2] + d[2] * t;
+        const Voxel* q = at(x, y, z);
+        if (!q || q->wq == 0) { tprev = -1.f; continue; }
+        float sd = q->tsdf();
+        if (sd < 0.f && tprev >= 0.f && sprev >= 0.f && q->nsurf >= min_frames) {
+            float th = tprev + (t - tprev) * sprev / (sprev - sd);
+            float px = o[0] + d[0] * th, py = o[1] + d[1] * th, pz = o[2] + d[2] * th;
+            int gx = ifloor(px / v), gy = ifloor(py / v), gz = ifloor(pz / v);
+            auto ts = [&](int a, int b, int c) { const Voxel* r = m->find_voxel(a, b, c); return (r && r->wq) ? r->tsdf() : 0.f; };
+            float n[3] = {ts(gx + 1, gy, gz) - ts(gx - 1, gy, gz), ts(gx, gy + 1, gz) - ts(gx, gy - 1, gz), ts(gx, gy, gz + 1) - ts(gx, gy, gz - 1)};
+            float nn = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (nn < 1e-6f) { n[0] = -d[0]; n[1] = -d[1]; n[2] = -d[2]; nn = 1.f; }
+            out[0] = px; out[1] = py; out[2] = pz;
+            out[3] = n[0] / nn; out[4] = n[1] / nn; out[5] = n[2] / nn; out[6] = th;
+            return 1;
+        }
+        tprev = t; sprev = sd;
+    }
+    return 0;
+}
+
 void tsdf_get(void* p, float* xyz, uint8_t* rgb, float* w) {
     Map* m = static_cast<Map*>(p);
     std::memcpy(xyz, m->out_xyz.data(), m->out_xyz.size() * sizeof(float));

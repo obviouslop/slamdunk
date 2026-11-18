@@ -12,14 +12,14 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
-LIB = os.path.join(ROOT, "build", "libtsdf.so")
-SRC = os.path.join(ROOT, "src", "tsdf.cpp")
+LIB = os.path.join(ROOT, "build", "libpc.so")
+SRCS = [os.path.join(ROOT, "src", f) for f in ("tsdf.cpp", "raw10.cpp")]
 
 
 def _load():
-    if not os.path.exists(LIB) or os.path.getmtime(LIB) < os.path.getmtime(SRC):
+    if not os.path.exists(LIB) or os.path.getmtime(LIB) < max(os.path.getmtime(s) for s in SRCS):
         os.makedirs(os.path.dirname(LIB), exist_ok=True)
-        subprocess.check_call(["g++", "-O3", "-std=c++17", "-fPIC", "-shared", "-fopenmp", "-o", LIB, SRC])
+        subprocess.check_call(["g++", "-O3", "-std=c++17", "-fPIC", "-shared", "-fopenmp", "-o", LIB] + SRCS)
     L = ctypes.CDLL(LIB)
     vp, fp, ip, dp, up = ctypes.c_void_p, ctypes.c_float, ctypes.c_int, ctypes.POINTER(ctypes.c_double), ctypes.c_void_p
     L.tsdf_new.restype = vp; L.tsdf_new.argtypes = [fp, fp, fp, fp, ip]
@@ -29,13 +29,34 @@ def _load():
     L.tsdf_extract.argtypes = [vp, ip, fp]
     L.tsdf_get.argtypes = [vp, up, up, up]
     L.tsdf_gc.argtypes = [vp, ip, ip]
+    L.tsdf_raycast.argtypes = [vp, up, up, fp, fp, ip, up]
+    L.pc_bin_raw10.argtypes = [up, ip, ip, ip, ip, fp, up, ip]
     return L
+
+
+_L = None
+
+
+def lib():
+    global _L
+    if _L is None:
+        _L = _load()
+    return _L
+
+
+def bin_raw10(buf, W=2464, H=2464, stride=3088, skip=0, black=64.0, threads=2):
+    """Packed RAW10 BGGR bytes -> (H/2, W/2, 3) float32 BGR, black removed (== LiveStereo._rgb(unpack(buf)))."""
+    a = np.frombuffer(buf, np.uint8)
+    assert a.size >= (H + skip) * stride
+    out = np.empty((H // 2, W // 2, 3), np.float32)
+    lib().pc_bin_raw10(a.ctypes.data, W, H, stride, skip, float(black), out.ctypes.data, threads)
+    return out
 
 
 class TSDF:
     def __init__(self, voxel=0.02, trunc_min=None, trunc_max=0.12, wmax=64.0, threads=3, sigma_disp=0.35,
                  max_depth=2.5, carve_depth=4.0, alloc_stride=2, gc_every=20):
-        self.L = _load()
+        self.L = lib()
         self.voxel = voxel; self.sigma_disp = sigma_disp; self.max_depth = max_depth; self.carve_depth = carve_depth
         self.alloc_stride = alloc_stride
         self.h = self.L.tsdf_new(voxel, trunc_min or 2 * voxel, trunc_max, wmax, threads)
@@ -69,6 +90,14 @@ class TSDF:
 
     def gc(self, min_age=30, min_nsurf=2):
         return self.L.tsdf_gc(self.h, min_age, min_nsurf)
+
+    def raycast(self, origin, direction, tmin=0.1, tmax=6.0, min_frames=3):
+        """-> (point, outward normal, distance) of the first surface along the ray, or None"""
+        o = np.ascontiguousarray(origin, np.float32); d = np.asarray(direction, np.float32)
+        d = np.ascontiguousarray(d / np.linalg.norm(d)); out = np.zeros(7, np.float32)
+        if self.L.tsdf_raycast(self.h, o.ctypes.data, d.ctypes.data, tmin, tmax, min_frames, out.ctypes.data):
+            return out[:3].copy(), out[3:6].copy(), float(out[6])
+        return None
 
     def extract(self, min_frames=3, min_weight=0.0):
         n = self.L.tsdf_extract(self.h, min_frames, min_weight)
