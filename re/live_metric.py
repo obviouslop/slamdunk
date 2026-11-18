@@ -18,11 +18,13 @@ for v in sys.argv[2:]:
     for item in v.split(",")[1:]:
         k, val = item.split("="); kw[k] = float(val)
     mf = int(kw.pop("min_frames", 4)); al = kw.pop("align", 0); pr = kw.pop("prior_rot", 0.01); pt = kw.pop("prior_trans", 0.02); at = kw.pop("abs_trans", 0.15); ar = kw.pop("abs_rot", 0.03)
+    tsc = kw.pop("tscale", 1.0)                         # head-translation scale hypothesis: true = reported / tscale
+    Tsv = Ts.copy(); Tsv[:, :3, 3] /= tsc
     ts = TSDF(**kw)
     D = []; npts = []; Tc = np.eye(4); corr = []
     for j in range(len(Zs)):
         Zj = Zs[j].astype(np.float32)
-        Tg = Tc @ Ts[j]                                   # map_from_stage (from earlier frames) applied to this pose
+        Tg = Tc @ Tsv[j]                                   # map_from_stage (from earlier frames) applied to this pose
         if j >= 20 and j % 6 == 0:                        # honest test: correction from frames < j only
             P, C, _ = ts.extract(min_frames=mf); npts.append(len(P))
             D.append(resid(P, Zj, Tg))

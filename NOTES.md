@@ -565,3 +565,17 @@ TODO: depth-correct own passthrough (user approved).
   align bias +0.11 cm, 35.3 % within 3 cm, correction up to 20.5 cm. No accuracy gain -> pcserver --align is now
   opt-in (default: map frame = STAGE). The earlier "drift" (live7) was most likely the depth bias + passthrough effect.
 - Session logs now in captures/logs/pcsession (was /tmp/pcsession: tmpfs = RAM); scratch outputs in captures/scratch.
+
+## live16: "far too far, near okay" - checks of the data (all negative)
+- Controllers held at 0.2-3 m (tools/ctrl_overlay.py, 152 frames): stereo - tracked = +0.2..+0.8 cm (<= 1 %).
+- Multi-view consistency (re/far_bias.py, near map < 1.2 m vs far views): within -1.6..+3 % at 1.4-4.5 m; iterative
+  refit is unstable (k and the near map co-vary) -> only the unfitted comparison is meaningful.
+- Head-translation scale (re/live_metric.py tscale=): consistency peaks at 1.00 (35.0 % within 3 cm; 0.97: 34.6,
+  1.03: 33.9, 1.06: 33.2) -> SteamVR head tracking is not scaled.
+- Floor height vs head height (re/head_scale.py): live13 frames 305-341 +3 cm over 1.1 m, other recordings
+  inconsistent in sign (+-5 cm) -> no systematic effect.
+- re/far_outliers.py "behind a known surface" rates (55 % at 1.4-1.8 m) are mostly an artefact of the splatted
+  reference on cluttered shelves (checked visually, captures/scratch/outliers16.jpg) - not used.
+=> point positions are metric within ~1-2 %. live13-16 composited captures show the IR passthrough, which SteamVR
+   draws at a fixed proxy depth -> far real objects appear closer than they are, so correct points look "too far".
+   Decisive tests (user): colour passthrough vs IR, DEPTH VIEW, and touching far surfaces with a controller.
