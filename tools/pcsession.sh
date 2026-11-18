@@ -2,9 +2,10 @@
 # One-command live point-cloud session on the Steam Frame:
 #   src/arcgrab (Arcturus cameras + 500 Hz poses) -> tools/pcserver.py (stereo + fusion) -> viewer (Godot/OpenXR)
 #
-# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer] [--gnss PORT] [--delay S] [--depth]
+# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record [OUTDIR]] [--scale S] [--no-viewer] [--gnss PORT] [--delay S] [--depth]
 #   --replay RECDIR  feed a recording through /dev/shm/arcgrab instead of the cameras (no camera handover)
-#   --record OUTDIR  also save stereo pairs (1 fps), 500 Hz poses and the composited headset view (2 fps)
+#   --record [OUTDIR]  also save stereo pairs (1 fps), 500 Hz poses (+ controllers) and the composited headset view
+#                    (2 fps); without OUTDIR the next free captures/liveN is used
 #   --delay S        wait S seconds (beeping) before the viewer starts: close the SteamVR dashboard meanwhile,
 #                    otherwise SteamVR shows the app as paused until you press "Resume"
 #   --depth          submit the viewer's depth buffer to the compositor (XR_KHR_composition_layer_depth);
@@ -23,7 +24,13 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_RUN=$2; shift 2;;
     --replay) REPLAY=$2; shift 2;;
-    --record) RECORD=$2; shift 2;;
+    --record)                          # --record [OUTDIR]: without a directory -> next free captures/liveN
+      if [ $# -ge 2 ] && [ "${2#--}" = "$2" ] && [ "$2" != auto ]; then RECORD=$2; shift 2
+      else
+        n=0; for d in captures/live[0-9]*; do [ -d "$d" ] || continue; k=${d#captures/live}; [ "$k" -eq "$k" ] 2>/dev/null && [ "$k" -ge "$n" ] && n=$((k + 1)); done
+        RECORD=captures/live$n; shift; [ "${1:-}" = auto ] && shift
+      fi
+      echo "recording to $RECORD";;
     --scale) SCALE=$2; shift 2;;
     --no-viewer) VIEWER=0; shift;;
     --gnss) GNSS=$2; shift 2;;
