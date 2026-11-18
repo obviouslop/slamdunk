@@ -535,3 +535,13 @@ TODO: depth-correct own passthrough (user approved).
   (Z ~1.4 m) 2.49 m.
 - Zones (tools/zones.py, viewer SELECT / ZONE tools): applied at extract time (publish, save, pick ray), never
   modify the TSDF. Saved PLY gets a "label" uchar property when label zones exist (ids = zones.LABELS + 1).
+
+## live13: controllers on the floor (frames 305-341, head 0.58-1.70 m)
+- Tracked controllers static to the mm (L y 0.055, R y 0.020) while the head moves -> tracking is stable.
+- tools/ctrl_overlay.py: stereo depth on the controller pixels vs the tracked render model:
+  0.4-0.6 m +1.9 cm, 0.6-0.8 m +1.9 cm, 0.8-1.2 m +1.7 cm, 1.2-3 m +1.3 cm (some floor pixels behind the
+  controllers fall in the +-25 cm window -> small positive bias). No growth with distance: depth, camera calibration
+  and HMD tracking agree. Model outline sits on the controllers in the images (a few px offset, to be quantified).
+- User saw floor points AND the virtual controllers sink when standing up -> both are consistent with each other and
+  with the camera data; what moves is SteamVR's passthrough image of the real floor (reprojected without true depth).
+  Test next: DEPTH VIEW on, same squat / stand.
