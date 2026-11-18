@@ -446,3 +446,23 @@ Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answe
   Limitations: the correction restarts at identity with each server start (autosaved objects can be off by
   the previous session's correction, <~10 cm); gnssd georef is fitted in STAGE (error <= the correction).
   --no-align disables it. Replay test: 302 frames, final correction 3 cm, yaw 0.05 deg.
+
+## 2026-11-18 live8 feedback (toolbox not clickable, toolbox "sinks into the floor")
+* Logs: native Frame profile was active and SteamVR accepted all suggested bindings (incl. right
+  trigger/value + click); D-pad worked. No right-hand action reached the viewer log/server (log may have been
+  cut: Godot did not flush stdout -> application/run/flush_stdout_on_print=true now). Help auto-hide never
+  fired (bug: compared against absolute ticks), so the head-locked help covered the view all session.
+* Fixes: trigger/grip also from the trigger_click/grip_click actions (fallback to the analog edge), every
+  input event printed + shown in the help panel with live trigger/grip values and profile (diagnostics for
+  the next session); help + diagnostics now attached to the toolbox (right of the panel), HUD reduced to
+  one line high (+ artificial horizon: pitch / roll / heading of the HMD pose, 4 cm at 0.7 m) and a hint/
+  message line low.
+* "Toolbox closer than the controller when near the face, sinks into the floor when standing up", and the
+  same for the cloud: depth-dependent mismatch between our correctly placed content and the passthrough.
+  SteamVR reprojects the (IR fallback) passthrough onto a depth proxy (roomview3d, a view-facing plane when
+  we hold the colour cameras), so real surfaces appear at the proxy distance. SteamVR exposes no app
+  passthrough-mesh extension (only XR_KHR_composition_layer_depth). Test: close one eye - if the toolbox
+  then sits on the controller, it is the passthrough depth. Experiment: pcsession --depth (Godot submits
+  its depth buffer; the compositor has an UpdateReprojectionDepth path).
+* live8 check of the fusion fix (re/live_metric.py): old bias -2.19 cm / 33.7 % within 3 cm, new +1.4 cm /
+  36.3 %, fewer points; back_w 3 chosen (live7 +0.39 cm / 39.3 %).

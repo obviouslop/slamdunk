@@ -31,6 +31,7 @@ const CTL_S := 1.0 / 30.0
 const TOOLS := ["scan", "paint", "measure", "anchor", "box", "path"]
 const MODELING := ["measure", "anchor", "box", "path"]
 const HELP_START_S := 30.0
+const HZ_PER_DEG := 0.0004   # horizon shift per degree of pitch (m at 0.7 m)
 
 const HELP_TEXT := """POINT CLOUD PLANNER - HELP (Y: close)
 
@@ -71,6 +72,10 @@ var cloud: CloudTiles
 var model: SceneModel
 var mat: ShaderMaterial
 var status: Label3D
+var status_low: Label3D
+var horizon: Node3D
+var hz_line: Node3D
+var hz_label: Label3D
 var help: Label3D
 var tips := {}
 var reticle: MeshInstance3D
@@ -110,6 +115,8 @@ var analog := {}             # hand/action -> pressed state for float-derived bu
 var last_stills := -1
 var still_pending_ms := -1
 var profile := ""
+var help_touched := false     # user toggled help -> no auto-hide
+var input_log: Array = []     # last input events (shown in the help panel, printed to the log)
 var map_from_stage := Transform3D.IDENTITY    # drift correction from the server (target)
 var stage_from_map_shown := Transform3D.IDENTITY   # smoothed, applied to cloud + objects
 var align_seq := -1
@@ -149,6 +156,7 @@ func _build_scene() -> void:
 		c.tracker = hand
 		c.pose = &"aim"
 		c.button_pressed.connect(_on_button.bind(hand))
+		c.button_released.connect(_on_button_released.bind(hand))
 		ctrl[hand] = c
 		var ray := MeshInstance3D.new()
 		var m := BoxMesh.new()
@@ -199,29 +207,26 @@ func _build_scene() -> void:
 	reticle.visible = false
 	origin.add_child(reticle)
 
-	status = Label3D.new()
-	status.font_size = 28
-	status.pixel_size = 0.0006
-	status.no_depth_test = true
-	status.modulate = Color(0.6, 1.0, 0.7)
-	status.outline_size = 6
-	status.position = Vector3(0, -0.17, -0.55)
-	camera.add_child(status)
+	# minimal HUD: one line high, one or two lines low, artificial horizon next to the top line
+	status = _hud_label(Vector3(0.015, 0.205, -0.7), HORIZONTAL_ALIGNMENT_LEFT)
+	status_low = _hud_label(Vector3(0, -0.215, -0.7), HORIZONTAL_ALIGNMENT_CENTER)
+	horizon = _build_horizon()
+	horizon.position = Vector3(-0.025, 0.205, -0.7)
+	camera.add_child(horizon)
 
 	help = Label3D.new()
 	help.text = HELP_TEXT
-	help.font_size = 26
-	help.pixel_size = 0.0007
+	help.font_size = 28
+	help.pixel_size = 0.00022
 	help.outline_size = 8
+	help.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 	help.no_depth_test = true
 	help.render_priority = 5
 	help.outline_render_priority = 4
 	help.modulate = Color(0.85, 0.95, 1.0)
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	help.position = Vector3(0, 0.02, -0.75)
-	camera.add_child(help)
 	_show_help(true)
-	get_tree().create_timer(HELP_START_S).timeout.connect(func(): if help.visible and Time.get_ticks_msec() < (HELP_START_S + 1) * 1000: _show_help(false))
+	get_tree().create_timer(HELP_START_S).timeout.connect(func(): if help.visible and not help_touched: _show_help(false))
 
 	pal_holder = Node3D.new()
 	origin.add_child(pal_holder)
@@ -243,7 +248,85 @@ func _build_scene() -> void:
 	palette.add_button("clear_objects", "CLEAR OBJ.", 1, 4, "danger")
 	palette.add_button("exit", "EXIT", 2, 4, "danger", 2)
 	palette.pressed.connect(_on_palette)
+	palette.add_child(help)                      # help + input diagnostics live next to the toolbox
+	var pw := (palette.bg.mesh as QuadMesh).size.x
+	help.position = Vector3(pw + 0.006, 0.02, 0.002)
 	_sync_palette()
+
+
+func _hud_label(pos: Vector3, align: int) -> Label3D:
+	var l := Label3D.new()
+	l.font_size = 24
+	l.pixel_size = 0.00034
+	l.outline_size = 6
+	l.no_depth_test = true
+	l.render_priority = 6
+	l.outline_render_priority = 5
+	l.modulate = Color(0.6, 1.0, 0.7, 0.9)
+	l.horizontal_alignment = align
+	l.position = pos
+	camera.add_child(l)
+	return l
+
+
+func _hud_mat(c: Color) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.albedo_color = c
+	m.no_depth_test = true
+	m.render_priority = 6
+	return m
+
+
+func _bar(parent: Node3D, size: Vector2, c: Color, pos := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var q := QuadMesh.new()
+	q.size = size
+	mi.mesh = q
+	mi.material_override = _hud_mat(c)
+	mi.position = pos
+	parent.add_child(mi)
+	return mi
+
+
+func _build_horizon() -> Node3D:
+	## Small artificial horizon (4 cm at 0.7 m): sky/ground line rotates with roll, shifts with pitch;
+	## fixed yellow aircraft marker; label with pitch / roll / heading of the HMD pose.
+	var root := Node3D.new()
+	_bar(root, Vector2(0.034, 0.024), Color(0.02, 0.05, 0.1, 0.45))
+	hz_line = Node3D.new()
+	root.add_child(hz_line)
+	_bar(hz_line, Vector2(0.03, 0.0012), Color(0.5, 0.85, 1.0, 0.95), Vector3(0, 0, 0.0005))
+	for k in [-2, -1, 1, 2]:                     # pitch ladder every 15 deg
+		_bar(hz_line, Vector2(0.008 if k % 2 else 0.012, 0.0006), Color(0.5, 0.85, 1.0, 0.6), Vector3(0, k * HZ_PER_DEG * 15.0, 0.0005))
+	_bar(root, Vector2(0.004, 0.0014), Color(1.0, 0.85, 0.2, 1.0), Vector3(-0.005, 0, 0.001))
+	_bar(root, Vector2(0.004, 0.0014), Color(1.0, 0.85, 0.2, 1.0), Vector3(0.005, 0, 0.001))
+	_bar(root, Vector2(0.0014, 0.0014), Color(1.0, 0.85, 0.2, 1.0), Vector3(0, 0, 0.001))
+	hz_label = Label3D.new()
+	hz_label.font_size = 20
+	hz_label.pixel_size = 0.00030
+	hz_label.outline_size = 5
+	hz_label.no_depth_test = true
+	hz_label.render_priority = 7
+	hz_label.outline_render_priority = 6
+	hz_label.modulate = Color(0.6, 0.9, 1.0, 0.9)
+	hz_label.position = Vector3(0, -0.018, 0)
+	root.add_child(hz_label)
+	return root
+
+
+func _update_horizon() -> void:
+	var b := camera.global_transform.basis
+	var fwd := -b.z
+	var right := b.x
+	var pitch := rad_to_deg(asin(clampf(fwd.y, -1.0, 1.0)))
+	var roll := rad_to_deg(asin(clampf(right.y, -1.0, 1.0)))   # + = left ear down
+	var heading := fposmod(rad_to_deg(atan2(fwd.x, -fwd.z)), 360.0)   # STAGE: 0 = -z (initial forward), clockwise
+	hz_line.rotation = Vector3(0, 0, deg_to_rad(-roll))
+	var off := clampf(-pitch * HZ_PER_DEG, -0.011, 0.011)
+	hz_line.position = Vector3(-sin(deg_to_rad(-roll)) * off, cos(deg_to_rad(-roll)) * off, 0)
+	hz_label.text = "P %+3.0f°  R %+3.0f°  H %03.0f°" % [pitch, roll, heading]
 
 
 func _on_session_begun() -> void:
@@ -276,8 +359,30 @@ func _send_cmd(c: String) -> void:
 	_write_ctl()
 
 
+func _log_input(s: String) -> void:
+	input_log.push_front("%.1f %s" % [Time.get_ticks_msec() / 1000.0, s])
+	input_log.resize(mini(input_log.size(), 6))
+	print("PCVIEW input ", s)
+
+
+func _on_button_released(action: String, hand: String) -> void:
+	_log_input("%s %s up" % [hand.left(1).to_upper(), action])
+	if action in ["trigger_click", "grip_click"]:          # boolean fallback for trigger / grip
+		var a := action.trim_suffix("_click")
+		if analog.get(hand + "/" + a, false):
+			analog[hand + "/" + a] = false
+			_analog_released(hand, a)
+
+
 func _on_button(action: String, hand: String) -> void:
-	## Digital buttons. Trigger and grip are handled as analog edges in _poll_analog (works with every profile).
+	## Digital buttons. Trigger and grip: analog edges in _poll_analog, or the click actions as a fallback.
+	_log_input("%s %s down" % [hand.left(1).to_upper(), action])
+	if action in ["trigger_click", "grip_click"]:
+		var a := action.trim_suffix("_click")
+		if not analog.get(hand + "/" + a, false):
+			analog[hand + "/" + a] = true
+			_analog_pressed(hand, a)
+		return
 	if hand == "right_hand":
 		match action:
 			"ax_button":
@@ -287,6 +392,7 @@ func _on_button(action: String, hand: String) -> void:
 			"x_button":
 				_still()
 			"y_button":
+				help_touched = true
 				_show_help(not help.visible)
 			"bumper":
 				_finish()
@@ -330,6 +436,7 @@ func _analog_pressed(hand: String, a: String) -> void:
 	if hand == "right_hand" and a == "trigger":
 		if pal_hit != null:
 			var id := palette.press()
+			_log_input("toolbox press '%s' (hovered '%s')" % [id, palette.hovered])
 			_buzz("right_hand", 0.3 if id != "" else 0.15, 0.03)
 			return
 		if tool == "paint":
@@ -369,6 +476,7 @@ func _on_palette(id: String) -> void:
 		"save":
 			_save()
 		"help":
+			help_touched = true
 			_show_help(not help.visible)
 		"hide":
 			_toggle_cloud()
@@ -726,6 +834,12 @@ func _process(delta: float) -> void:
 			else:
 				_set_ray("right_hand", 0.3)
 
+	if help.visible:
+		var r: XRController3D = ctrl["right_hand"]
+		var l: XRController3D = ctrl["left_hand"]
+		help.text = HELP_TEXT + "\n\nINPUT  R trig %.2f grip %.2f   L trig %.2f grip %.2f   profile %s\n%s" % [
+			r.get_float("trigger"), r.get_float("grip"), l.get_float("trigger"), l.get_float("grip"), profile.get_file(),
+			"\n".join(input_log)]
 	_update_status()
 
 
@@ -748,20 +862,18 @@ func _hint() -> String:
 
 
 func _update_status() -> void:
-	var lines := []
-	var age := (Time.get_ticks_msec() - cloud.last_update_ms) / 1000.0 if cloud.last_update_ms > 0 else -1.0
-	lines.append("%s  %s%s   %s" % ["● REC" if scanning else "■ STOPPED", tool.to_upper(),
-		" (CAPTURING)" if painting else "", _hint()])
-	lines.append("cloud %d pts  age %.1fs  %.1f fr/s   %d fps  objects %d%s   Y: help" % [cloud.total_points, age,
-		float(srv.get("fps", 0.0)), Engine.get_frames_per_second(),
-		model.objects.size(), "" if cloud.visible else "  (cloud hidden)"])
+	_update_horizon()
+	status.text = "%s  %s%s   %.1f fr/s  %d fps  %dk pts%s" % ["● REC" if scanning else "■ STOP", tool.to_upper(),
+		" ●" if painting else "", float(srv.get("fps", 0.0)), Engine.get_frames_per_second(), cloud.total_points / 1000,
+		"" if cloud.visible else "  (hidden)"]
 	if not gnss.is_empty():
-		var g := "GNSS %s  sats %d  hacc %.2f m" % [gnss.get("fix", "?"), int(gnss.get("sats", 0)), float(gnss.get("hacc", -1))]
-		if georef.get("ok", false):
-			g += "  georef rms %.2f m (n=%d)" % [float(georef.get("rms", 0)), int(georef.get("n", 0))]
-		lines.append(g)
-	if profile != "" and not "frame_controller" in profile:
-		lines.append("controller profile %s (not native Frame: X/Y/D-pad may be limited)" % profile.get_file())
+		status.text += "   GNSS %s %.2f m%s" % [gnss.get("fix", "?"), float(gnss.get("hacc", -1)),
+			"  geo %.2f" % float(georef.get("rms", 0)) if georef.get("ok", false) else ""]
+	var low := []
 	if Time.get_ticks_msec() - msg_ms < 4000:
-		lines.append(msg)
-	status.text = "\n".join(lines)
+		low.append(msg)
+	if tool != "scan":
+		low.append(_hint())
+	if profile != "" and not "frame_controller" in profile:
+		low.append("controller profile %s: X/Y/D-pad may not work" % profile.get_file())
+	status_low.text = "\n".join(low)

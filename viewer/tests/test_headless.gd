@@ -127,6 +127,12 @@ func _late_b() -> void:
 	inst.call("_on_button", "x_button", "right_hand")
 	var ctl = JSON.parse_string(FileAccess.get_file_as_string("/dev/shm/pcctl.json"))
 	check(ctl["cmd"] == "still" and int(ctl["cmd_seq"]) == seq + 1, "X sends still command")
+	ip.hovered = "paint"
+	inst.set("pal_hit", {"id": "paint"})
+	inst.call("_on_button", "trigger_click", "right_hand")
+	check(inst.get("tool") == "paint", "trigger click presses the hovered toolbox button")
+	inst.call("_on_button_released", "trigger_click", "right_hand")
+	check(inst.get("analog").get("right_hand/trigger") == false, "trigger click release")
 	var mfs := Transform3D(Basis(Vector3.UP, 0.1), Vector3(0.05, -0.02, 0.1))
 	inst.set("stage_from_map_shown", mfs.affine_inverse())
 	var pm: Vector3 = inst.call("_to_map", Vector3(1, 1, 1))

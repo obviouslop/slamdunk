@@ -2,13 +2,15 @@
 # One-command live point-cloud session on the Steam Frame:
 #   src/arcgrab (Arcturus cameras + 500 Hz poses) -> tools/pcserver.py (stereo + fusion) -> viewer (Godot/OpenXR)
 #
-# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer] [--gnss PORT] [--delay S]
+# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer] [--gnss PORT] [--delay S] [--depth]
 #   --replay RECDIR  feed a recording through /dev/shm/arcgrab instead of the cameras (no camera handover)
 #   --record OUTDIR  also save stereo pairs (1 fps), 500 Hz poses and the composited headset view (2 fps)
 #   --delay S        wait S seconds (beeping) before the viewer starts: close the SteamVR dashboard meanwhile,
 #                    otherwise SteamVR shows the app as paused until you press "Resume"
+#   --depth          submit the viewer's depth buffer to the compositor (XR_KHR_composition_layer_depth);
+#                    experiment: SteamVR may use app depth for reprojection / passthrough depth
 #   --gnss PORT      run tools/gnssd.py on a USB serial GNSS receiver (e.g. /dev/ttyACM0) for georeferencing
-# Saved sessions (left Y in the viewer) land in captures/sessions/scan_*.{json,ply};
+# Saved sessions (toolbox SAVE) land in captures/sessions/scan_*.{json,ply};
 # export with tools/scene_export.py captures/sessions/scan_*.json  (-> .glb for Blender)
 #
 # Notes: every camera session hands the colour cameras over from XRService (short tracking blip at
@@ -16,7 +18,7 @@
 # tracking afterwards, restart SteamVR. See NOTES.md.
 set -u
 cd "$(dirname "$0")/.."
-SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS=""; DELAY=0
+SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS=""; DELAY=0; DEPTH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_RUN=$2; shift 2;;
@@ -26,12 +28,14 @@ while [ $# -gt 0 ]; do
     --no-viewer) VIEWER=0; shift;;
     --gnss) GNSS=$2; shift 2;;
     --delay) DELAY=$2; shift 2;;
+    --depth) DEPTH=1; shift;;
     *) echo "unknown option $1"; exit 1;;
   esac
 done
 PY=/home/steamos/playground/.venv/bin/python
 GODOT=/home/steamos/code/Godot_v4.7.2-stable_linux.arm64
 LOG=/tmp/pcsession; mkdir -p "$LOG"
+if [ $DEPTH = 1 ]; then printf '[xr]\nopenxr/submit_depth_buffer=true\n' > viewer/override.cfg; else rm -f viewer/override.cfg; fi
 PIDS=()
 cleanup() {
   trap - INT TERM EXIT
