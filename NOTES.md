@@ -389,7 +389,7 @@ Depth / scale analysis on live7 (re/depth_bias.py caches per-pixel world rays + 
   vertical tracking drift is likely but not proven (furniture confounds it).
 * Composited view (2 fps capture) shows the IR passthrough fallback the whole time; viewer at 70-72 fps
   (judder fix confirmed), server 5-6.7 fused frames/s live.
-=> Remaining "too deep / too high" impression is most likely the passthrough reprojection (SteamVR
+=> [SUPERSEDED by the 12:00 section: the main cause was a 3 cm fusion bias, fixed] Remaining "too deep / too high" impression is most likely the passthrough reprojection (SteamVR
    projects the IR fallback image onto a depth proxy, so surfaces in the passthrough appear at the proxy
    depth), plus drift for areas scanned earlier. Proposed in-headset test: MEASURE tool from floor to
    ceiling on the cloud (snap on), and the controller resting on the floor vs. the floor dots
