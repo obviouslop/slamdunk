@@ -545,3 +545,13 @@ TODO: depth-correct own passthrough (user approved).
 - User saw floor points AND the virtual controllers sink when standing up -> both are consistent with each other and
   with the camera data; what moves is SteamVR's passthrough image of the real floor (reprojected without true depth).
   Test next: DEPTH VIEW on, same squat / stand.
+
+## live14: depth submission, viewer frame rate
+- User A/B: with --depth (viewer submits its depth buffer) the cloud stays anchored much better; SteamVR overlay
+  windows placed on real objects stay put (compositor-drawn quads), while our cloud drifted / scaled with head motion.
+  The live14 HUD (composited captures) shows the viewer at 70-72 fps on a 72 Hz display (refresh 72.0 in the log), so
+  late frames are re-warped by SteamVR; with app depth that warp is per pixel and correct for head translation.
+  -> pcsession submits depth by default (--no-depth to disable).
+- Viewer: HUD / help / horizon label text updated at 10 Hz instead of every frame (Label3D rebuilds its mesh on each
+  text change); pcserver and liverec run with nice 8 so the viewer gets the CPU first (5 cores, pcserver ~1.5).
+- (live14 used the IR passthrough: blue tint in the composited captures.)

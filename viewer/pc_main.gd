@@ -31,6 +31,7 @@ var GEOREF_PATH := SHM.path_join("georef.json")
 var ALIGN_PATH := SHM.path_join("pcalign.json")
 var ZONES_PATH := SHM.path_join("pczones.json")
 const CTL_S := 1.0 / 30.0
+const HUD_S := 0.1
 const TOOLS := ["scan", "paint", "measure", "anchor", "box", "path", "select", "zone"]
 const MODELING := ["measure", "anchor", "box", "path"]
 const ZONE_SHAPES := ["box", "outline", "cut below", "cut above"]
@@ -120,6 +121,7 @@ var cmd := ""
 var cmd_seq := 0
 var save_name := ""
 var ctl_accum := 0.0
+var hud_accum := 0.0
 var hit := {}                # latest pchit.json
 var hit_seq := -1
 var hit_rx_ms := 0
@@ -374,7 +376,8 @@ func _update_horizon() -> void:
 	hz_line.rotation = Vector3(0, 0, deg_to_rad(-roll))
 	var off := clampf(-pitch * HZ_PER_DEG, -0.011, 0.011)
 	hz_line.position = Vector3(-sin(deg_to_rad(-roll)) * off, cos(deg_to_rad(-roll)) * off, 0)
-	hz_label.text = "P %+3.0f°  R %+3.0f°  H %03.0f°" % [pitch, roll, heading]
+	if hud_accum == 0.0:                 # text at the HUD rate (see _process), line every frame
+		hz_label.text = "P %+3.0f°  R %+3.0f°  H %03.0f°" % [pitch, roll, heading]
 
 
 func _on_session_begun() -> void:
@@ -1090,6 +1093,12 @@ func _process(delta: float) -> void:
 			else:
 				_set_ray("right_hand", 0.3)
 
+	hud_accum += delta
+	if hud_accum >= HUD_S:
+		hud_accum = 0.0
+	_update_horizon()
+	if hud_accum != 0.0:                  # Label3D text changes rebuild meshes: update the text at 10 Hz, not per frame
+		return
 	if help.visible:
 		var r: XRController3D = ctrl["right_hand"]
 		var l: XRController3D = ctrl["left_hand"]
@@ -1130,7 +1139,6 @@ func _hint() -> String:
 
 
 func _update_status() -> void:
-	_update_horizon()
 	status.text = "%s  %s%s   %.1f fr/s  %d fps  %dk pts%s" % ["● REC" if scanning else "■ STOP", tool.to_upper(),
 		" ●" if painting else "", float(srv.get("fps", 0.0)), Engine.get_frames_per_second(), cloud.total_points / 1000,
 		"" if cloud.visible else "  (hidden)"]

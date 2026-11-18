@@ -2,14 +2,15 @@
 # One-command live point-cloud session on the Steam Frame:
 #   src/arcgrab (Arcturus cameras + 500 Hz poses) -> tools/pcserver.py (stereo + fusion) -> viewer (Godot/OpenXR)
 #
-# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record [OUTDIR]] [--scale S] [--no-viewer] [--gnss PORT] [--delay S] [--depth]
+# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record [OUTDIR]] [--scale S] [--no-viewer] [--gnss PORT] [--delay S] [--no-depth]
 #   --replay RECDIR  feed a recording through /dev/shm/arcgrab instead of the cameras (no camera handover)
 #   --record [OUTDIR]  also save stereo pairs (1 fps), 500 Hz poses (+ controllers) and the composited headset view
 #                    (2 fps); without OUTDIR the next free captures/liveN is used
 #   --delay S        wait S seconds (beeping) before the viewer starts: close the SteamVR dashboard meanwhile,
 #                    otherwise SteamVR shows the app as paused until you press "Resume"
-#   --depth          submit the viewer's depth buffer to the compositor (XR_KHR_composition_layer_depth);
-#                    experiment: SteamVR may use app depth for reprojection / passthrough depth
+#   --no-depth       do not submit the viewer's depth buffer (XR_KHR_composition_layer_depth). Default is to submit
+#                    it: SteamVR then re-warps late frames with per-pixel depth, which keeps the cloud anchored when
+#                    the head moves (without it the cloud drifts / scales vs. the real world; live14 A/B)
 #   --gnss PORT      run tools/gnssd.py on a USB serial GNSS receiver (e.g. /dev/ttyACM0) for georeferencing
 # Saved sessions (toolbox SAVE) land in captures/sessions/scan_*.{json,ply};
 # export with tools/scene_export.py captures/sessions/scan_*.json  (-> .glb for Blender)
@@ -19,7 +20,7 @@
 # tracking afterwards, restart SteamVR. See NOTES.md.
 set -u
 cd "$(dirname "$0")/.."
-SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS=""; DELAY=0; DEPTH=0
+SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS=""; DELAY=0; DEPTH=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_RUN=$2; shift 2;;
@@ -36,6 +37,7 @@ while [ $# -gt 0 ]; do
     --gnss) GNSS=$2; shift 2;;
     --delay) DELAY=$2; shift 2;;
     --depth) DEPTH=1; shift;;
+    --no-depth) DEPTH=0; shift;;
     *) echo "unknown option $1"; exit 1;;
   esac
 done
@@ -66,7 +68,7 @@ else
   src/arcgrab --seconds "$((SECONDS_RUN + 10))" --max-exp 3000 "${POSELOG[@]}" 2> "$LOG/arcgrab.log" & PIDS+=($!)
 fi
 sleep 3
-$PY -I tools/pcserver.py --scale "$SCALE" > "$LOG/pcserver.log" 2>&1 & PIDS+=($!)
+nice -n 8 $PY -I tools/pcserver.py --scale "$SCALE" > "$LOG/pcserver.log" 2>&1 & PIDS+=($!)
 if [ -n "$GNSS" ]; then
   $PY -I tools/gnssd.py --port "$GNSS" > "$LOG/gnssd.log" 2>&1 & PIDS+=($!)
 fi
@@ -78,7 +80,7 @@ sleep 5; pw-play tools/sounds/start.wav 2>/dev/null &
 if [ -n "$RECORD" ] && [ -z "$REPLAY" ]; then
   mkdir -p "$RECORD/composited"
   ffmpeg -hide_banner -loglevel error -f v4l2 -i /dev/video99 -t "$SECONDS_RUN" -vf fps=2 -q:v 3 "$RECORD/composited/c_%04d.jpg" & PIDS+=($!)
-  $PY -I tools/liverec.py "$RECORD" --seconds "$SECONDS_RUN" --fps 1 > "$LOG/liverec.log" 2>&1 & PIDS+=($!)
+  nice -n 8 $PY -I tools/liverec.py "$RECORD" --seconds "$SECONDS_RUN" --fps 1 > "$LOG/liverec.log" 2>&1 & PIDS+=($!)
 fi
 echo "session running (${SECONDS_RUN}s max, Ctrl-C to stop); logs in $LOG"
 if [ $VIEWER = 1 ]; then wait "$VPID"; else sleep "$SECONDS_RUN"; fi
