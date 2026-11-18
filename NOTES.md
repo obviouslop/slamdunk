@@ -512,3 +512,5 @@ TODO: depth-correct own passthrough (user approved).
   Not tested: the shader on a GPU (headless Godot has no renderer) -> watch the viewer log for shader errors.
 - Replay test harness: start replay_shm.py and wait for "replaying ..." before pcserver, else the server maps the
   stale /dev/shm/arcgrab that the replay then truncates -> SIGBUS (this was the earlier "core dump").
+- Depth calibration refit after the colour fix (cache recomputed, old one kept as all_depth_bggr.npz):
+  table 0.793 m raw -> fit k=1.0240, d0=+0.785 px -> 0.754 m (was k=1.0313, d0=+0.999 with swapped channels).
