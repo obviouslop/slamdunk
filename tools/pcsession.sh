@@ -2,16 +2,19 @@
 # One-command live point-cloud session on the Steam Frame:
 #   src/arcgrab (Arcturus cameras + 500 Hz poses) -> tools/pcserver.py (stereo + fusion) -> viewer (Godot/OpenXR)
 #
-# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer]
+# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer] [--gnss PORT]
 #   --replay RECDIR  feed a recording through /dev/shm/arcgrab instead of the cameras (no camera handover)
 #   --record OUTDIR  also save stereo pairs (1 fps), 500 Hz poses and the composited headset view (2 fps)
+#   --gnss PORT      run tools/gnssd.py on a USB serial GNSS receiver (e.g. /dev/ttyACM0) for georeferencing
+# Saved sessions (left Y in the viewer) land in captures/sessions/scan_*.{json,ply};
+# export with tools/scene_export.py captures/sessions/scan_*.json  (-> .glb for Blender)
 #
 # Notes: every camera session hands the colour cameras over from XRService (short tracking blip at
 # start/end). Controller tracking survived the last sessions, but if the laser/controllers stop
 # tracking afterwards, restart SteamVR. See NOTES.md.
 set -u
 cd "$(dirname "$0")/.."
-SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1
+SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1; GNSS="" 
 while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_RUN=$2; shift 2;;
@@ -19,6 +22,7 @@ while [ $# -gt 0 ]; do
     --record) RECORD=$2; shift 2;;
     --scale) SCALE=$2; shift 2;;
     --no-viewer) VIEWER=0; shift;;
+    --gnss) GNSS=$2; shift 2;;
     *) echo "unknown option $1"; exit 1;;
   esac
 done
@@ -35,7 +39,7 @@ cleanup() {
   echo "session ended; logs in $LOG"
 }
 trap cleanup INT TERM EXIT
-rm -f /dev/shm/pointcloud.bin /dev/shm/pcctl.json
+rm -f /dev/shm/pointcloud.bin /dev/shm/pcctl.json /dev/shm/pchit.json /dev/shm/pcstatus.json /dev/shm/gnss.json /dev/shm/georef.json
 
 if [ -n "$REPLAY" ]; then
   $PY -I tools/replay_shm.py "$REPLAY" --loop > "$LOG/replay.log" 2>&1 & PIDS+=($!)
@@ -46,6 +50,9 @@ else
 fi
 sleep 3
 $PY -I tools/pcserver.py --scale "$SCALE" > "$LOG/pcserver.log" 2>&1 & PIDS+=($!)
+if [ -n "$GNSS" ]; then
+  $PY -I tools/gnssd.py --port "$GNSS" > "$LOG/gnssd.log" 2>&1 & PIDS+=($!)
+fi
 if [ $VIEWER = 1 ]; then
   timeout "$SECONDS_RUN" "$GODOT" --path viewer --xr-mode on > "$LOG/viewer.log" 2>&1 & VPID=$!; PIDS+=($VPID)
 fi
