@@ -514,3 +514,24 @@ TODO: depth-correct own passthrough (user approved).
   stale /dev/shm/arcgrab that the replay then truncates -> SIGBUS (this was the earlier "core dump").
 - Depth calibration refit after the colour fix (cache recomputed, old one kept as all_depth_bggr.npz):
   table 0.793 m raw -> fit k=1.0240, d0=+0.785 px -> 0.754 m (was k=1.0313, d0=+0.999 with swapped channels).
+
+## 2026-11-18 (later): live12, controller log, zones, live11 overwrite
+- live11 frames.jsonl / poses.jsonl / hmd_500hz.txt / thumbs and the 00000 pair were overwritten at 16:16 by a
+  session started with `--record captures/live11`. Poses of frames 1..195 rebuilt from the depth cache T into
+  captures/live11/frames.jsonl.recovered (ts = i seconds; exposure lost). pcsession.sh and liverec.py now refuse to
+  record into a directory that already holds a recording.
+- arcgrab --pose-log also writes FILE.controllers (left/right controller poses, same 500 Hz query and clock).
+  tools/ctrl_overlay.py draws the SteamVR render model of the Frame controllers
+  (/opt/steamvr/drivers/frame_controller/resources/rendermodels) at the logged pose into the rectified frames of a recording.
+- Colour passthrough vs controller model: the colour cameras sit 5.7 cm in front of the eyes (head_from_camL); with a
+  single projection depth this pushes near objects outward by ~1 deg at 10 deg off-centre, ~3 deg at 30 deg (0.4 m
+  controller) - matches the observation; DEPTH VIEW should not show it.
+- live12 floor check (re/floor_consistency.py, per-frame RANSAC floor plane, SteamVR floor y = 0): with the table
+  calibration (k 1.024, d0 +0.785) the floor is at -1 cm (seen from 1.5-2 m) and +2 cm (2-2.5 m); raw it sank
+  11 cm per metre of distance. Single-frame depth is consistent with distance now.
+- Ceiling: plain grey, almost no real matches; 24 % of upward depth (Z < 2.5 m) lands > 2.65 m, 13 % > 3.5 m
+  (horizontal streaks = SGBM matching sensor noise). A blurred-gradient texture filter removes them only together
+  with ~40 % of good depth elsewhere -> not applied. Ceiling points from standing (Z ~0.6 m) 2.39 m, from sitting
+  (Z ~1.4 m) 2.49 m.
+- Zones (tools/zones.py, viewer SELECT / ZONE tools): applied at extract time (publish, save, pick ray), never
+  modify the TSDF. Saved PLY gets a "label" uchar property when label zones exist (ids = zones.LABELS + 1).
