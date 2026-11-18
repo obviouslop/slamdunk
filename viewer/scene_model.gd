@@ -194,6 +194,12 @@ static func _fill_spheres(mm: MultiMesh, centers: Array, radii: Array) -> void:
 		mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * r), centers[i]))
 
 
+func set_zones_visible(on: bool) -> void:
+	for i in range(objects.size()):
+		if objects[i]["type"] == "zone":
+			nodes[i].visible = on
+
+
 func set_selection(centers: Array, radii: Array) -> void:
 	_fill_spheres(selection.multimesh, centers, radii)
 

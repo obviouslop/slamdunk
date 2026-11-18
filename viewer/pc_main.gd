@@ -21,15 +21,20 @@ extends Node3D
 ## captures/sessions/autosave_scene.json (every change; reloaded at start), captures/sessions/<name>.json,
 ## captures/stills/<time>/ (server, tools/stills.py)
 
-const CTL_PATH := "/dev/shm/pcctl.json"
-const HIT_PATH := "/dev/shm/pchit.json"
-const STATUS_PATH := "/dev/shm/pcstatus.json"
-const GNSS_PATH := "/dev/shm/gnss.json"
-const GEOREF_PATH := "/dev/shm/georef.json"
-const ALIGN_PATH := "/dev/shm/pcalign.json"
+# shared-memory files; PCVIEW_SHM redirects them (tests must never touch a running session's files)
+var SHM: String = OS.get_environment("PCVIEW_SHM") if OS.has_environment("PCVIEW_SHM") else "/dev/shm"
+var CTL_PATH := SHM.path_join("pcctl.json")
+var HIT_PATH := SHM.path_join("pchit.json")
+var STATUS_PATH := SHM.path_join("pcstatus.json")
+var GNSS_PATH := SHM.path_join("gnss.json")
+var GEOREF_PATH := SHM.path_join("georef.json")
+var ALIGN_PATH := SHM.path_join("pcalign.json")
+var ZONES_PATH := SHM.path_join("pczones.json")
 const CTL_S := 1.0 / 30.0
-const TOOLS := ["scan", "paint", "measure", "anchor", "box", "path"]
+const TOOLS := ["scan", "paint", "measure", "anchor", "box", "path", "select", "zone"]
 const MODELING := ["measure", "anchor", "box", "path"]
+const ZONE_SHAPES := ["box", "outline", "cut below", "cut above"]
+const ZONE_MODES := ["exclude", "include", "label"]
 const HELP_START_S := 30.0
 const HZ_PER_DEG := 0.0004   # horizon shift per degree of pitch (m at 0.7 m)
 
@@ -67,6 +72,13 @@ TOOLS
 DEPTH VIEW (toolbox): camera image drawn on its own measured
   depth (~3 Hz, world-locked). Where it matches the real world,
   the depth is right; gaps = no depth (SteamVR view shows).
+  SELECT   hold trigger: brush over points (stick: size),
+           then toolbox DELETE / KEEP ONLY / LABEL; grip clears
+  ZONE     EXCLUDE / INCLUDE / LABEL region (toolbox):
+           BOX 4 clicks, OUTLINE traced on the floor (hold
+           trigger, like the playspace), CUT BELOW / ABOVE 1 click
+           any include zone -> only what is inside is kept
+           A undoes the last zone; zones never delete fused data
 Clear cloud / objects / exit: toolbox, press twice.
 Save (toolbox): cloud .ply + objects .json in captures/sessions"""
 
@@ -125,6 +137,16 @@ var still_pending_ms := -1
 var profile := ""
 var help_touched := false     # user toggled help -> no auto-hide
 var input_log: Array = []     # last input events (shown in the help panel, printed to the log)
+var sel_centers: Array = []   # SELECT brush dabs (map frame), pending until DELETE / KEEP ONLY / LABEL
+var sel_radii: Array = []
+var sel_strokes: Array = []   # index of the first dab of each stroke (A = undo stroke)
+var brush_r := 0.06
+var brushing := false
+var zone_mode := "exclude"
+var zone_shape := "box"
+var label_idx := 1            # SceneModel.LABELS ("wall")
+var tracing := false          # ZONE outline: trigger held, tracing on the floor
+var zones_shown := true
 var map_from_stage := Transform3D.IDENTITY    # drift correction from the server (target)
 var stage_from_map_shown := Transform3D.IDENTITY   # smoothed, applied to cloud + objects
 var align_seq := -1
@@ -136,6 +158,7 @@ func _ready() -> void:
 	DirAccess.make_dir_recursive_absolute(sessions_dir)
 	_build_scene()
 	_load_autosave()
+	_write_zones()
 	xr_interface = XRServer.find_interface("OpenXR")
 	if xr_interface and xr_interface.is_initialized():
 		get_viewport().use_xr = true
@@ -198,12 +221,14 @@ func _build_scene() -> void:
 	mat.set_shader_parameter("point_size", sizes[size_idx])
 	mat.set_shader_parameter("alpha", alpha)
 	cloud = CloudTiles.new(mat)
+	cloud.path = SHM.path_join("pointcloud.bin")
 	origin.add_child(cloud)
 	passthrough = DepthPassthrough.new()      # depth-correct camera view (toolbox: DEPTH VIEW)
+	passthrough.path = SHM.path_join("pcpass.bin")
 	origin.add_child(passthrough)
 
 	model = SceneModel.new()
-	model.changed.connect(_autosave)
+	model.changed.connect(_on_model_changed)
 	origin.add_child(model)
 
 	reticle = MeshInstance3D.new()
@@ -248,20 +273,28 @@ func _build_scene() -> void:
 	pal_holder.add_child(palette)
 	for i in range(TOOLS.size()):
 		palette.add_button(TOOLS[i], TOOLS[i].to_upper(), i % 4, i / 4, "tool")
-	palette.add_button("undo", "UNDO", 2, 1)
-	palette.add_button("snap", "SNAP", 3, 1)
-	palette.add_button("rec", "● REC", 0, 2)
-	palette.add_button("still", "STILL", 1, 2)
-	palette.add_button("save", "SAVE", 2, 2)
-	palette.add_button("help", "HELP", 3, 2)
-	palette.add_button("hide", "HIDE CLOUD", 0, 3)
-	palette.add_button("size-", "SIZE -", 1, 3)
-	palette.add_button("size+", "SIZE +", 2, 3)
-	palette.add_button("opacity", "OPACITY", 3, 3)
-	palette.add_button("clear_cloud", "CLEAR CLOUD", 0, 4, "danger")
-	palette.add_button("clear_objects", "CLEAR OBJ.", 1, 4, "danger")
-	palette.add_button("pass", "DEPTH VIEW", 2, 4)
-	palette.add_button("exit", "EXIT", 3, 4, "danger")
+	palette.add_button("undo", "UNDO", 0, 2)
+	palette.add_button("snap", "SNAP", 1, 2)
+	palette.add_button("rec", "● REC", 2, 2)
+	palette.add_button("still", "STILL", 3, 2)
+	palette.add_button("save", "SAVE", 0, 3)
+	palette.add_button("help", "HELP", 1, 3)
+	palette.add_button("pass", "DEPTH VIEW", 2, 3)
+	palette.add_button("hide", "HIDE CLOUD", 3, 3)
+	palette.add_button("size-", "SIZE -", 0, 4)
+	palette.add_button("size+", "SIZE +", 1, 4)
+	palette.add_button("opacity", "OPACITY", 2, 4)
+	palette.add_button("zone_show", "ZONES ON", 3, 4)
+	palette.add_button("clear_cloud", "CLEAR CLOUD", 0, 5, "danger")
+	palette.add_button("clear_objects", "CLEAR OBJ.", 1, 5, "danger")
+	palette.add_button("exit", "EXIT", 2, 5, "danger", 2)
+	# per-tool row (SELECT / ZONE)
+	palette.add_button("sel_delete", "DELETE", 0, 6)
+	palette.add_button("sel_keep", "KEEP ONLY", 1, 6)
+	palette.add_button("sel_label", "LABEL", 2, 6)
+	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
+	palette.add_button("zone_shape", "BOX", 1, 6)
+	palette.add_button("next_label", "NEXT LABEL", 3, 6)
 	palette.pressed.connect(_on_palette)
 	palette.add_child(help)                      # help + input diagnostics live next to the toolbox
 	var pw := (palette.bg.mesh as QuadMesh).size.x
@@ -455,6 +488,10 @@ func _primary() -> void:
 		_buzz("right_hand", 0.3 if id != "" else 0.15, 0.03)
 	elif tool in MODELING:
 		_place()
+	elif tool == "select":
+		_dab(true)
+	elif tool == "zone":
+		_zone_click()
 	elif tool in ["scan", "paint"]:
 		_say("bumper places points in MEASURE / ANCHOR / BOX / PATH; hold the analog trigger to capture")
 
@@ -464,7 +501,14 @@ func _analog_pressed(hand: String, a: String) -> void:
 		if pal_hit != null:                     # also accept the analog trigger on the toolbox
 			_primary()
 			return
-		painting = true                         # capture where you point (any tool)
+		if tool == "select":
+			brushing = true                     # SELECT: sweep the brush while held
+			_dab(true)
+		elif tool == "zone" and zone_shape == "outline":
+			tracing = true                      # ZONE outline: trace on the floor while held (like the playspace)
+			pts.clear()
+		else:
+			painting = true                     # capture where you point (other tools)
 	elif hand == "right_hand" and a == "grip":
 		_finish()
 	elif hand == "left_hand" and a == "trigger":
@@ -476,6 +520,10 @@ func _analog_pressed(hand: String, a: String) -> void:
 func _analog_released(hand: String, a: String) -> void:
 	if hand == "right_hand" and a == "trigger":
 		painting = false
+		brushing = false
+		if tracing:
+			tracing = false
+			_finish_outline()
 	elif hand == "left_hand" and a == "trigger":
 		peeking = false
 		_apply_cloud_visibility()
@@ -523,6 +571,26 @@ func _on_palette(id: String) -> void:
 			_say("objects cleared")
 		"pass":
 			_toggle_passthrough()
+		"sel_delete":
+			_apply_selection("exclude")
+		"sel_keep":
+			_apply_selection("include")
+		"sel_label":
+			_apply_selection("label")
+		"next_label":
+			label_idx = (label_idx + 1) % SceneModel.LABELS.size()
+			_say("label " + _label_name().to_upper())
+		"zone_mode":
+			zone_mode = ZONE_MODES[(ZONE_MODES.find(zone_mode) + 1) % ZONE_MODES.size()]
+			_say("zone mode " + zone_mode.to_upper())
+		"zone_shape":
+			zone_shape = ZONE_SHAPES[(ZONE_SHAPES.find(zone_shape) + 1) % ZONE_SHAPES.size()]
+			pts.clear()
+			model.set_preview("", [], null)
+			_say("zone shape " + zone_shape.to_upper())
+		"zone_show":
+			zones_shown = not zones_shown
+			model.set_zones_visible(zones_shown)
 		"exit":
 			_exit()
 	_sync_palette()
@@ -538,12 +606,26 @@ func _sync_palette() -> void:
 	palette.set_text("hide", "SHOW CLOUD" if not cloud_shown else "HIDE CLOUD")
 	palette.set_active("help", help.visible)
 	palette.set_active("pass", passthrough.visible)
+	palette.set_active("zone_show", zones_shown)
+	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
+	for id in ["sel_delete", "sel_keep", "sel_label"]:
+		palette.set_shown(id, tool == "select")
+	for id in ["zone_mode", "zone_shape"]:
+		palette.set_shown(id, tool == "zone")
+	palette.set_shown("next_label", tool == "select" or (tool == "zone" and zone_mode == "label"))
+	palette.set_text("sel_label", "LABEL " + _label_name().to_upper())
+	palette.set_text("zone_mode", zone_mode.to_upper() + (" " + _label_name().to_upper() if zone_mode == "label" else ""))
+	palette.set_text("zone_shape", zone_shape.to_upper())
+	palette.set_active("zone_mode", true, SceneModel.ZONE_COLS[zone_mode] * Color(0.6, 0.6, 0.6, 0.95) if zone_mode != "label" \
+		else SceneModel.ZONE_COLS[_label_name()] * Color(0.6, 0.6, 0.6, 0.95))
 	palette.set_title("%s   %s" % [tool.to_upper(), "● REC" if scanning else "■ STOPPED"])
 
 
 func _set_tool(t: String) -> void:
-	if pts.size() > 0:
+	if pts.size() > 0 and tool in MODELING:
 		_finish()
+	brushing = false
+	tracing = false
 	tool = t
 	painting = false
 	pts.clear()
@@ -653,6 +735,14 @@ func _place() -> void:
 
 
 func _finish() -> void:
+	if tool == "select":
+		if not sel_centers.is_empty():
+			_clear_selection()
+			_say("selection cleared")
+		return
+	if tool == "zone" and zone_shape == "outline":
+		_finish_outline()
+		return
 	if tool == "box" and pts.size() == 3:
 		var o := model.add_box(pts)
 		_say("panel %s" % o.get("name", "failed (degenerate)"))
@@ -664,13 +754,135 @@ func _finish() -> void:
 
 
 func _undo() -> void:
-	if pts.size() > 0:
+	if tool == "select" and not sel_strokes.is_empty():
+		var k: int = sel_strokes.pop_back()
+		sel_centers.resize(k)
+		sel_radii.resize(k)
+		model.set_selection(sel_centers, sel_radii)
+		_say("undo brush stroke")
+	elif pts.size() > 0:
 		pts.pop_back()
 		_say("undo point")
 	else:
 		var o := model.remove_last()
 		_say("removed %s" % o.get("name", "nothing"))
 	_buzz("right_hand", 0.2, 0.02)
+
+
+# ------------------------------------------------------------------ SELECT / ZONE
+
+func _label_name() -> String:
+	return SceneModel.LABELS[label_idx]
+
+
+func _dab(new_stroke: bool) -> void:
+	## SELECT brush: add a sphere at the cursor (scanned surface under the ray, else the free point).
+	var c = _cursor()
+	if c == null:
+		return
+	var p := _to_map(c)
+	if not new_stroke and not sel_centers.is_empty() and (sel_centers[sel_centers.size() - 1] as Vector3).distance_to(p) < brush_r * 0.4:
+		return
+	if new_stroke:
+		sel_strokes.append(sel_centers.size())
+	sel_centers.append(p)
+	sel_radii.append(brush_r)
+	model.set_selection(sel_centers, sel_radii)
+
+
+func _clear_selection() -> void:
+	sel_centers.clear()
+	sel_radii.clear()
+	sel_strokes.clear()
+	model.set_selection([], [])
+
+
+func _apply_selection(mode: String) -> void:
+	if sel_centers.is_empty():
+		_say("nothing selected: hold the trigger and sweep over the points")
+		return
+	var z := {"mode": mode, "shape": "spheres", "centers": sel_centers.duplicate(), "radii": sel_radii.duplicate()}
+	if mode == "label":
+		z["label"] = _label_name()
+	var o := model.add_zone(z)
+	_clear_selection()
+	_buzz("right_hand", 0.5, 0.06)
+	_say(SceneModel.zone_text(o) + "   (A: undo)")
+
+
+func _floor_point() -> Variant:
+	## Ground point under the right ray for tracing zone outlines (STAGE): the scanned surface when there is a fresh
+	## hit (works on sloped / uneven ground outdoors), else the SteamVR floor plane y = 0; null if neither.
+	var c: XRController3D = ctrl.get("right_hand")
+	if c == null or not c.get_has_tracking_data():
+		return null
+	if hit.get("hit", false) and Time.get_ticks_msec() - hit_rx_ms < 500:
+		return c.global_transform.origin - c.global_transform.basis.z * float(hit["dist"])
+	var o := c.global_transform.origin
+	var d := -c.global_transform.basis.z
+	if d.y > -0.02:
+		return null
+	var t := -o.y / d.y
+	return o + d * t if t > 0.0 and t < 20.0 else null
+
+
+func _zone_cursor() -> Variant:
+	return _floor_point() if zone_shape == "outline" else _cursor()
+
+
+func _zone_base() -> Dictionary:
+	var z := {"mode": zone_mode}
+	if zone_mode == "label":
+		z["label"] = _label_name()
+	return z
+
+
+func _zone_click() -> void:
+	var c = _zone_cursor()
+	if c == null:
+		_say("point at the floor" if zone_shape == "outline" else "no point under the ray")
+		return
+	var p := _to_map(c)
+	_buzz()
+	match zone_shape:
+		"box":
+			pts.append(p)
+			if pts.size() == 4:
+				var b := SceneModel.box_from_points(pts)
+				pts.clear()
+				if b.is_empty():
+					_say("zone box failed (degenerate)")
+					return
+				var z := _zone_base()
+				z.merge({"shape": "box", "center": b["center"], "axes": b["axes"], "size": b["size"]})
+				_say(SceneModel.zone_text(model.add_zone(z)))
+		"outline":
+			pts.append(p)
+		"cut below", "cut above":
+			var below := zone_shape == "cut below"
+			var o := model.add_zone({"mode": "exclude", "shape": "cut", "side": "below" if below else "above",
+				"y": p.y - 0.02 if below else p.y + 0.02, "c": p})
+			_say(SceneModel.zone_text(o) + "   (A: undo)")
+
+
+func _finish_outline() -> void:
+	if pts.size() >= 3:
+		var z := _zone_base()
+		z.merge({"shape": "prism", "points": pts.duplicate()})
+		_say(SceneModel.zone_text(model.add_zone(z)) + "   (A: undo)")
+	elif pts.size() > 0:
+		_say("outline needs at least 3 points")
+	pts.clear()
+	model.set_preview("", [], null)
+
+
+func _write_zones() -> void:
+	_write_json(ZONES_PATH, {"seq": Time.get_unix_time_from_system(), "zones": model.zones()})
+
+
+func _on_model_changed() -> void:
+	_autosave()
+	_write_zones()
 
 
 # ------------------------------------------------------------------ files
@@ -828,7 +1040,9 @@ func _process(delta: float) -> void:
 	var lc: XRController3D = ctrl.get("left_hand")
 	if rc:
 		var st := rc.get_vector2("primary")
-		if abs(st.y) > 0.3:
+		if abs(st.y) > 0.3 and tool == "select":
+			brush_r = clampf(brush_r * (1.0 + st.y * delta * 1.5), 0.01, 0.6)
+		elif abs(st.y) > 0.3:
 			free_dist = clampf(free_dist * (1.0 + st.y * delta * 1.5), 0.15, 8.0)
 	if lc:
 		var st := lc.get_vector2("primary")
@@ -841,7 +1055,16 @@ func _process(delta: float) -> void:
 	if rc and rc.get_has_tracking_data():
 		var t := rc.global_transform
 		pal_hit = palette.ray_hit(t.origin, -t.basis.z)
-	var modeling: bool = tool in MODELING
+	var modeling: bool = tool in MODELING or tool == "select" or tool == "zone"
+	if brushing:
+		_dab(false)
+	if tracing:
+		var fp = _floor_point()
+		if fp != null:
+			var mp := _to_map(fp)
+			if pts.is_empty() or (pts[pts.size() - 1] as Vector3).distance_to(mp) > 0.05:
+				pts.append(mp)
+	reticle.scale = Vector3.ONE * (brush_r / 0.008 if tool == "select" and pal_hit == null else 1.0)
 	if pal_hit != null:
 		reticle.visible = true
 		reticle.position = pal_hit["point"]
@@ -849,7 +1072,7 @@ func _process(delta: float) -> void:
 		_set_ray("right_hand", pal_hit["dist"], Color(0.5, 0.8, 1.0))
 		model.set_preview("", [], null)
 	else:
-		var cur = _cursor() if modeling else null
+		var cur = (_zone_cursor() if tool == "zone" else _cursor()) if modeling else null
 		if rc and cur != null:
 			var on_surface: bool = snap and hit.get("hit", false) and Time.get_ticks_msec() - hit_rx_ms < 500
 			reticle.visible = true
@@ -858,6 +1081,8 @@ func _process(delta: float) -> void:
 			_set_ray("right_hand", (cur - rc.global_transform.origin).length(), Color(0.6, 1.0, 0.6) if on_surface else Color(1.0, 0.7, 0.3))
 			if tool in ["box", "path", "measure"]:
 				model.set_preview(tool, pts, _to_map(cur))
+			elif tool == "zone" and zone_shape in ["box", "outline"]:
+				model.set_preview(zone_shape, pts, _to_map(cur))
 		else:
 			reticle.visible = false
 			if tool == "paint":
@@ -889,6 +1114,18 @@ func _hint() -> String:
 			return "bumper: %s   A: undo" % steps[mini(pts.size(), 3)]
 		"path":
 			return "bumper: add point (%d)   grip: finish   A: undo" % pts.size()
+		"select":
+			return "hold trigger: brush (%d cm, stick ↑↓)   %d dabs   toolbox: DELETE / KEEP ONLY / LABEL   grip: clear   A: undo stroke" % [
+				roundi(brush_r * 100), sel_centers.size()]
+		"zone":
+			match zone_shape:
+				"box":
+					var steps := ["corner 1", "corner 2 (first edge)", "width", "height"]
+					return "%s box   bumper: %s   A: undo" % [zone_mode.to_upper(), steps[mini(pts.size(), 3)]]
+				"outline":
+					return "%s outline   hold trigger: trace on the floor (or bumper: corners, grip: close)   %d pts" % [zone_mode.to_upper(), pts.size()]
+				_:
+					return "bumper on the floor/ceiling: remove everything %s it   A: undo" % ("below" if zone_shape == "cut below" else "above")
 	return ""
 
 

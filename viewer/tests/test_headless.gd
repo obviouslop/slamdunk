@@ -1,6 +1,7 @@
 extends SceneTree
 ## Headless checks (no XR, no window):
-##   godot --headless --path viewer --xr-mode off -s res://tests/test_headless.gd
+##   PCVIEW_SHM=<scratch> PCVIEW_SESSIONS_DIR=<scratch> godot --headless --path viewer --xr-mode off -s res://tests/test_headless.gd
+##   (PCVIEW_SHM keeps the test away from a running session's /dev/shm files)
 ## Needs a published cloud at /dev/shm/pointcloud.bin for the tile test (tools/pcpub.py some.ply).
 
 var fails := 0
@@ -112,7 +113,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 20, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 29, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()
@@ -125,7 +126,7 @@ func _late_b() -> void:
 	check(inst.get("model").objects.size() == 0, "clear objects after confirmation")
 	var seq: int = inst.get("cmd_seq")
 	inst.call("_on_button", "x_button", "right_hand")
-	var ctl = JSON.parse_string(FileAccess.get_file_as_string("/dev/shm/pcctl.json"))
+	var ctl = JSON.parse_string(FileAccess.get_file_as_string(inst.get("CTL_PATH")))
 	check(ctl["cmd"] == "still" and int(ctl["cmd_seq"]) == seq + 1, "X sends still command")
 	ip.hovered = "paint"
 	inst.set("pal_hit", {"id": "paint"})
@@ -165,4 +166,37 @@ func _late_b() -> void:
 	check(dp.mesh != null and dp.mesh.get_surface_count() == 1, "passthrough grid mesh built")
 	inst.call("_on_palette", "pass")
 	check(not dp.visible, "DEPTH VIEW off")
+	# SELECT: per-tool buttons, brush selection -> exclusion zone, undo; zone file for the server
+	inst.call("_on_palette", "zone")
+	check(ip.buttons["zone_mode"]["enabled"] and not ip.buttons["sel_delete"]["enabled"], "ZONE shows its own toolbox row")
+	inst.call("_on_palette", "select")
+	check(ip.buttons["sel_delete"]["enabled"] and not ip.buttons["zone_mode"]["enabled"], "SELECT shows its own toolbox row")
+	var nz: int = inst.get("model").objects.size()
+	inst.set("sel_centers", [Vector3(0, 1, -1), Vector3(0.05, 1, -1)])
+	inst.set("sel_radii", [0.1, 0.1])
+	inst.set("sel_strokes", [0])
+	inst.call("_on_palette", "sel_delete")
+	var mo: Array = inst.get("model").objects
+	check(mo.size() == nz + 1 and mo[mo.size() - 1]["type"] == "zone" and mo[mo.size() - 1]["mode"] == "exclude", "DELETE makes an exclusion zone")
+	check((inst.get("sel_centers") as Array).is_empty(), "selection cleared after DELETE")
+	var zf: Dictionary = inst.call("_read_json", inst.get("ZONES_PATH"))
+	check((zf.get("zones", []) as Array).size() >= 1 and zf["zones"][-1]["shape"] == "spheres", "zones written for the server")
+	inst.call("_undo")
+	check(inst.get("model").objects.size() == nz, "A undoes the zone")
+	# ZONE: cut + outline + label mode
+	inst.call("_on_palette", "zone")
+	inst.call("_on_palette", "zone_mode")
+	check(inst.get("zone_mode") == "include", "zone mode cycles to INCLUDE")
+	inst.call("_on_palette", "zone_mode")
+	check(inst.get("zone_mode") == "label" and ip.buttons["next_label"]["enabled"], "LABEL mode shows NEXT LABEL")
+	inst.set("pts", [Vector3(0, 0, 0), Vector3(2, 0, 0), Vector3(2, 0, -2)])
+	inst.set("zone_shape", "outline")
+	inst.call("_finish")
+	mo = inst.get("model").objects
+	check(mo[mo.size() - 1]["shape"] == "prism" and mo[mo.size() - 1]["mode"] == "label" and mo[mo.size() - 1]["label"] == "wall", "outline -> label prism zone")
+	inst.call("_on_palette", "zone_show")
+	check(not inst.get("model").nodes[mo.size() - 1].visible, "ZONES OFF hides zones")
+	inst.call("_on_palette", "zone_show")
+	inst.call("_undo")
+	inst.call("_on_palette", "scan")
 
