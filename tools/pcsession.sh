@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# One-command live point-cloud session on the Steam Frame:
+#   src/arcgrab (Arcturus cameras + 500 Hz poses) -> tools/pcserver.py (stereo + fusion) -> viewer (Godot/OpenXR)
+#
+# usage: tools/pcsession.sh [--seconds N] [--replay RECDIR] [--record OUTDIR] [--scale S] [--no-viewer]
+#   --replay RECDIR  feed a recording through /dev/shm/arcgrab instead of the cameras (no camera handover)
+#   --record OUTDIR  also save stereo pairs (1 fps), 500 Hz poses and the composited headset view (2 fps)
+#
+# Notes: every camera session hands the colour cameras over from XRService (short tracking blip at
+# start/end). Controller tracking survived the last sessions, but if the laser/controllers stop
+# tracking afterwards, restart SteamVR. See NOTES.md.
+set -u
+cd "$(dirname "$0")/.."
+SECONDS_RUN=600; REPLAY=""; RECORD=""; SCALE=0.35; VIEWER=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --seconds) SECONDS_RUN=$2; shift 2;;
+    --replay) REPLAY=$2; shift 2;;
+    --record) RECORD=$2; shift 2;;
+    --scale) SCALE=$2; shift 2;;
+    --no-viewer) VIEWER=0; shift;;
+    *) echo "unknown option $1"; exit 1;;
+  esac
+done
+PY=/home/steamos/playground/.venv/bin/python
+GODOT=/home/steamos/code/Godot_v4.7.2-stable_linux.arm64
+LOG=/tmp/pcsession; mkdir -p "$LOG"
+PIDS=()
+cleanup() {
+  trap - INT TERM EXIT
+  for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
+  # give arcgrab time to hand the cameras back (restores sensor crop/exposure, releases locks)
+  for i in $(seq 1 30); do alive=0; for p in "${PIDS[@]}"; do kill -0 "$p" 2>/dev/null && alive=1; done; [ $alive = 0 ] && break; sleep 0.2; done
+  pw-play tools/sounds/done.wav 2>/dev/null
+  echo "session ended; logs in $LOG"
+}
+trap cleanup INT TERM EXIT
+rm -f /dev/shm/pointcloud.bin /dev/shm/pcctl.json
+
+if [ -n "$REPLAY" ]; then
+  $PY -I tools/replay_shm.py "$REPLAY" --loop > "$LOG/replay.log" 2>&1 & PIDS+=($!)
+else
+  POSELOG=()
+  [ -n "$RECORD" ] && { mkdir -p "$RECORD"; POSELOG=(--pose-log "$RECORD/hmd_500hz.txt"); }
+  src/arcgrab --seconds "$((SECONDS_RUN + 10))" --max-exp 3000 "${POSELOG[@]}" 2> "$LOG/arcgrab.log" & PIDS+=($!)
+fi
+sleep 3
+$PY -I tools/pcserver.py --scale "$SCALE" > "$LOG/pcserver.log" 2>&1 & PIDS+=($!)
+if [ $VIEWER = 1 ]; then
+  timeout "$SECONDS_RUN" "$GODOT" --path viewer --xr-mode on > "$LOG/viewer.log" 2>&1 & VPID=$!; PIDS+=($VPID)
+fi
+sleep 5; pw-play tools/sounds/start.wav 2>/dev/null &
+if [ -n "$RECORD" ] && [ -z "$REPLAY" ]; then
+  mkdir -p "$RECORD/composited"
+  ffmpeg -hide_banner -loglevel error -f v4l2 -i /dev/video99 -t "$SECONDS_RUN" -vf fps=2 -q:v 3 "$RECORD/composited/c_%04d.jpg" & PIDS+=($!)
+  $PY -I tools/liverec.py "$RECORD" --seconds "$SECONDS_RUN" --fps 1 > "$LOG/liverec.log" 2>&1 & PIDS+=($!)
+fi
+echo "session running (${SECONDS_RUN}s max, Ctrl-C to stop); logs in $LOG"
+if [ $VIEWER = 1 ]; then wait "$VPID"; else sleep "$SECONDS_RUN"; fi
