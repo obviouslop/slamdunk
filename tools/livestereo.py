@@ -75,7 +75,8 @@ class LiveStereo:
         b = r[0::2, 0::2]; g = (r[0::2, 1::2] + r[1::2, 0::2]) * 0.5; rr = r[1::2, 1::2]
         return np.clip(np.stack([b, g, rr], -1) - 64, 0, None)
 
-    def points(self, rawL, rawR, wb=None):
+    def rectified(self, rawL, rawR, wb=None):
+        """-> disp (rectified camL view, px), colour (rectified, BGR float in raw units), wb, s (gain to 0..255)"""
         cL, cR = self._rgb(rawL), self._rgb(rawR)
         if wb is None:
             m = cL.reshape(-1, 3).mean(0); wb = m.mean() / np.maximum(m, 1e-6)
@@ -91,6 +92,25 @@ class LiveStereo:
         if self.median:
             dm = cv2.medianBlur(disp, self.median)          # suppress isolated noisy matches
             disp = np.where(np.abs(dm - disp) < 1.0, disp, -1)
+        return disp, rc, wb, s
+
+    def depth(self, rawL, rawR, far=None):
+        """-> Z (rectified camL view, metres along the optical axis, 0 = invalid, valid up to `far`),
+              RGB uint8 rectified colour, disp"""
+        disp, rc, wb, s = self.rectified(rawL, rawR)
+        far = far or self.max_depth
+        Z = np.where(disp > 0.5, self.f * self.baseline / np.maximum(disp, 1e-6), 0).astype(np.float32)
+        Z[(Z > far) | (Z < self.min_depth)] = 0
+        rgb = np.clip(rc * (wb * s), 0, 255).astype(np.uint8)[:, :, ::-1]
+        return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
+
+    def world_from_rect(self, hmd_pose_3x4):
+        H = np.eye(4); H[:3, :] = np.asarray(hmd_pose_3x4); W = H @ self.head_from_camL
+        Rr = np.eye(4); Rr[:3, :3] = self.R1.T             # camL <- rect
+        return W @ Rr
+
+    def points(self, rawL, rawR, wb=None):
+        disp, rc, wb, s = self.rectified(rawL, rawR, wb)
         Z = self.f * self.baseline / np.maximum(disp, 1e-6)
         ok = (disp > 0.5) & (Z < self.max_depth) & (Z > self.min_depth)
         if self.edge_rel > 0:   # flying pixels at depth discontinuities = most of the "spray" along view rays
