@@ -42,6 +42,12 @@ func _initialize() -> void:
 	check(abs(SceneModel.path_length(m2.objects[2]["points"]) - 2.0) < 1e-5, "path length")
 	m2.remove_last()
 	check(m2.objects.size() == 2, "undo")
+	var me := m2.add_measure(Vector3(0, 0, 0), Vector3(3, 4, 0))
+	check(me["name"] == "M1" and "5.000 m" in SceneModel.measure_text(me["points"][0], me["points"][1]), "measure 5 m")
+	var m3 := SceneModel.new()
+	root.add_child(m3)
+	m3.from_dict(JSON.parse_string(JSON.stringify(m2.to_dict())))
+	check(m3.objects.size() == 3 and m3.objects[2]["type"] == "measure", "measure round trip")
 
 	# tiles
 	var mat := ShaderMaterial.new()
@@ -60,17 +66,68 @@ func _initialize() -> void:
 	ct._poll()
 	check(ct.pending.is_empty(), "unchanged tiles not re-uploaded (poll %d us)" % (Time.get_ticks_usec() - t0))
 
-	# main scene script compiles and runs without XR
-	OS.set_environment("PCVIEW_NO_XR", "1")
-	var scn: PackedScene = load("res://pc_main.tscn")
-	var inst := scn.instantiate()
-	root.add_child(inst)
-	check(inst.get("tool") == "scan", "pc_main instantiated")
-	print("FAILS: %d" % fails)
 
 
 var frames := 0
 
+var inst: Node
+
+
 func _process(_delta: float) -> bool:
 	frames += 1
+	if frames == 2:
+		_late_a()
+	elif frames == 4:
+		_late_b()
+		print("FAILS: %d" % fails)
 	return frames > 30
+
+
+func _late_a() -> void:
+	# palette: hit test, tools, confirm for danger buttons
+	var pal := Palette.new()
+	root.add_child(pal)
+	pal.add_button("a", "A", 0, 0, "tool")
+	pal.add_button("x", "X", 1, 0, "danger")
+	var got := []
+	pal.pressed.connect(func(id): got.append(id))
+	var ca: Vector2 = pal.buttons["a"]["rect"].get_center()
+	var cx: Vector2 = pal.buttons["x"]["rect"].get_center()
+	var h = pal.ray_hit(Vector3(ca.x, ca.y, 0.5), Vector3(0, 0, -1))
+	check(h != null and h["id"] == "a" and abs(h["dist"] - 0.5) < 1e-5, "palette ray hit")
+	check(pal.press() == "a" and got == ["a"], "palette press")
+	pal.ray_hit(Vector3(cx.x, cx.y, 0.5), Vector3(0, 0, -1))
+	check(pal.press() == "" and got.size() == 1, "danger needs confirmation")
+	check(pal.press() == "x" and got == ["a", "x"], "danger confirmed on 2nd press")
+	check(pal.ray_hit(Vector3(5, 5, 0.5), Vector3(0, 0, -1)) == null, "palette miss")
+
+	# main scene script compiles and runs without XR
+	OS.set_environment("PCVIEW_NO_XR", "1")
+	OS.set_environment("PCVIEW_SESSIONS_DIR", OS.get_cache_dir().path_join("pcview_test_sessions"))   # never touch real data
+	var scn: PackedScene = load("res://pc_main.tscn")
+	inst = scn.instantiate()
+	root.add_child(inst)
+
+
+func _late_b() -> void:
+	check(inst.get("tool") == "scan", "pc_main instantiated")
+	var ip: Palette = inst.get("palette")
+	check(ip.buttons.size() == 19, "toolbox has %d buttons" % ip.buttons.size())
+	inst.call("_on_palette", "measure")
+	check(inst.get("tool") == "measure", "toolbox selects tool")
+	var nobj: int = inst.get("model").objects.size()
+	inst.get("model").add_anchor(Vector3(0, 1, 0))
+	ip.hovered = "clear_objects"
+	ip.press()
+	check(inst.get("model").objects.size() == nobj + 1, "clear objects not on first press")
+	ip.hovered = "clear_objects"
+	ip.press()
+	check(inst.get("model").objects.size() == 0, "clear objects after confirmation")
+	var seq: int = inst.get("cmd_seq")
+	inst.call("_on_button", "x_button", "right_hand")
+	var ctl = JSON.parse_string(FileAccess.get_file_as_string("/dev/shm/pcctl.json"))
+	check(ctl["cmd"] == "still" and int(ctl["cmd_seq"]) == seq + 1, "X sends still command")
+	inst.call("_on_button", "dpad_up", "left_hand")
+	check(inst.get("scanning") == false, "D-pad up stops scanning")
+	inst.call("_on_button", "dpad_up", "left_hand")
+

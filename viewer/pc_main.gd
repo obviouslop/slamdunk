@@ -3,20 +3,23 @@ extends Node3D
 ##
 ## Cloud: tiles published by tools/pcserver.py at /dev/shm/pointcloud.bin (CloudTiles). Coordinates are
 ## OpenVR Standing == OpenXR STAGE, so XROrigin3D stays at identity.
-## Planning objects (SceneModel): anchors, boxes, paths; placed on the scanned surface under the right
-## controller ray (server raycast, /dev/shm/pchit.json) or freely at the ray tip.
+## Planning objects (SceneModel): anchors, boxes/panels, paths, measurements; placed on the scanned surface
+## under the right controller ray (server raycast, /dev/shm/pchit.json) or freely at the ray tip.
 ##
-## Right controller   A        next tool: SCAN > PAINT > ANCHOR > BOX > PATH
-##                    trigger  PAINT: hold to capture where you point; ANCHOR/BOX/PATH: place a point
-##                    B        SCAN/PAINT: point size; ANCHOR/BOX/PATH: undo (last point, else last object)
-##                    grip     BOX: finish as panel after 3 points; PATH: finish the path
-##                    stick    up/down: free-placement distance; click: surface snap on/off
-## Left controller    trigger  transparency      X  show/hide cloud     Y  save (cloud .ply + scene .json)
-##                    stick click: scanning on/off   grip hold 1 s: clear cloud, 3 s: also clear objects
+## Steam Frame controllers (native OpenXR profile /interaction_profiles/valve/frame_controller_valve):
+##   RIGHT (tool hand)  trigger  use tool / press a toolbox button      A  undo        B  next tool
+##                      grip or bumper  finish panel / path            X  stereo still  Y  help on/off
+##                      stick up/down  free-placement distance          stick click  surface snap on/off
+##   LEFT (toolbox)     toolbox panel floats above the controller (point at it with the right hand)
+##                      D-pad up  scan REC / STOP      D-pad down  hide/show cloud    D-pad left/right  point size
+##                      View  toolbox on/off           trigger (hold)  peek: hide the cloud while held
+##                      stick up/down  cloud opacity
+##   Destructive actions (clear cloud, clear objects, exit) only from the toolbox, with a confirming 2nd press.
 ##
 ## Files: /dev/shm/pcctl.json (to server), /dev/shm/pchit.json, /dev/shm/pcstatus.json (from server),
 ## /dev/shm/gnss.json + /dev/shm/georef.json (tools/gnssd.py, optional),
-## captures/sessions/autosave_scene.json (every change; reloaded at start), captures/sessions/<name>.json
+## captures/sessions/autosave_scene.json (every change; reloaded at start), captures/sessions/<name>.json,
+## captures/stills/<time>/ (server, tools/stills.py)
 
 const CTL_PATH := "/dev/shm/pcctl.json"
 const HIT_PATH := "/dev/shm/pchit.json"
@@ -24,7 +27,41 @@ const STATUS_PATH := "/dev/shm/pcstatus.json"
 const GNSS_PATH := "/dev/shm/gnss.json"
 const GEOREF_PATH := "/dev/shm/georef.json"
 const CTL_S := 1.0 / 30.0
-const TOOLS := ["scan", "paint", "anchor", "box", "path"]
+const TOOLS := ["scan", "paint", "measure", "anchor", "box", "path"]
+const MODELING := ["measure", "anchor", "box", "path"]
+const HELP_START_S := 30.0
+
+const HELP_TEXT := """POINT CLOUD PLANNER - HELP (Y: close)
+
+RIGHT HAND (tools)
+  trigger ..... use tool / press toolbox button
+  A ........... undo (last point, else last object)
+  B ........... next tool
+  X ........... stereo still (pair + pose + time + GNSS)
+  Y ........... this help
+  grip/bumper . finish panel (box after 3 points) / path
+  stick ↑↓ .... distance of the free point (orange)
+  stick click . snap to scanned surface on/off (green)
+
+LEFT HAND (toolbox above the controller)
+  D-pad ↑ ..... scan: RECORD / STOP
+  D-pad ↓ ..... hide / show cloud
+  D-pad ← → ... point size
+  View ........ toolbox on/off
+  trigger hold  peek: hide cloud while held
+  stick ↑↓ .... cloud opacity
+
+TOOLS
+  SCAN     fuse everything you look at
+  PAINT    fuse only where you point (hold trigger)
+  MEASURE  2 clicks: distance, height diff, horizontal
+  ANCHOR   1 click: named reference point
+  BOX      4 clicks: edge, edge, width, height
+           3 clicks + grip: 4 cm panel (solar panel)
+  PATH     clicks + grip: conduit / cable run
+
+Clear cloud / objects / exit: toolbox, press twice.
+Save (toolbox): cloud .ply + objects .json in captures/sessions"""
 
 var xr_interface: OpenXRInterface
 var origin: XROrigin3D
@@ -33,20 +70,25 @@ var cloud: CloudTiles
 var model: SceneModel
 var mat: ShaderMaterial
 var status: Label3D
+var help: Label3D
+var tips := {}
 var reticle: MeshInstance3D
 var ret_mat: StandardMaterial3D
+var palette: Palette
+var pal_holder: Node3D
 var ctrl := {}
 var rays := {}
-var sizes := [0.004, 0.006, 0.010, 0.016]
-var size_idx := 1
-var alphas := [0.3, 0.55, 0.8, 1.0]
-var alpha_idx := 1
+var sizes := [0.003, 0.004, 0.006, 0.010, 0.016]
+var size_idx := 2
+var alpha := 0.55
 
 var tool := "scan"
 var scanning := true
 var painting := false
 var snap := true
 var free_dist := 0.6
+var cloud_shown := true
+var peeking := false
 var pts: Array = []          # clicked points of the object in progress
 var cmd := ""
 var cmd_seq := 0
@@ -61,13 +103,17 @@ var georef := {}
 var slow_accum := 0.0
 var msg := ""
 var msg_ms := 0
-var grip_down_ms := -1
-var grip_stage := 0
 var sessions_dir := ""
+var pal_hit = null           # palette hit of the right ray this frame
+var analog := {}             # hand/action -> pressed state for float-derived buttons
+var last_stills := -1
+var still_pending_ms := -1
+var profile := ""
 
 
 func _ready() -> void:
-	sessions_dir = ProjectSettings.globalize_path("res://").path_join("../captures/sessions").simplify_path()
+	sessions_dir = OS.get_environment("PCVIEW_SESSIONS_DIR") if OS.has_environment("PCVIEW_SESSIONS_DIR") \
+		else ProjectSettings.globalize_path("res://").path_join("../captures/sessions").simplify_path()
 	DirAccess.make_dir_recursive_absolute(sessions_dir)
 	_build_scene()
 	_load_autosave()
@@ -99,7 +145,6 @@ func _build_scene() -> void:
 		c.tracker = hand
 		c.pose = &"aim"
 		c.button_pressed.connect(_on_button.bind(hand))
-		c.button_released.connect(_on_release.bind(hand))
 		ctrl[hand] = c
 		var ray := MeshInstance3D.new()
 		var m := BoxMesh.new()
@@ -111,13 +156,27 @@ func _build_scene() -> void:
 		ray.material_override = rm
 		c.add_child(ray)
 		rays[hand] = ray
+		var tip := Label3D.new()
+		tip.font_size = 24
+		tip.pixel_size = 0.0004
+		tip.outline_size = 6
+		tip.no_depth_test = true
+		tip.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		tip.modulate = Color(1.0, 0.95, 0.6)
+		tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		tip.position = Vector3(0.09 if hand == "right_hand" else -0.09, -0.02, 0.06)
+		tip.text = "A undo  B next tool\nX still  Y help\ntrigger: use  grip: finish" if hand == "right_hand" \
+			else "D-pad ↑ rec/stop  ↓ hide\n← → point size\nView: toolbox  trigger: peek"
+		tip.visible = false
+		c.add_child(tip)
+		tips[hand] = tip
 		origin.add_child(c)
-	_set_ray("left_hand", 0.15)
+	_set_ray("left_hand", 0.0)
 
 	mat = ShaderMaterial.new()
 	mat.shader = load("res://pc_points.gdshader")
 	mat.set_shader_parameter("point_size", sizes[size_idx])
-	mat.set_shader_parameter("alpha", alphas[alpha_idx])
+	mat.set_shader_parameter("alpha", alpha)
 	cloud = CloudTiles.new(mat)
 	origin.add_child(cloud)
 
@@ -144,6 +203,43 @@ func _build_scene() -> void:
 	status.outline_size = 6
 	status.position = Vector3(0, -0.17, -0.55)
 	camera.add_child(status)
+
+	help = Label3D.new()
+	help.text = HELP_TEXT
+	help.font_size = 26
+	help.pixel_size = 0.0007
+	help.outline_size = 8
+	help.no_depth_test = true
+	help.render_priority = 5
+	help.outline_render_priority = 4
+	help.modulate = Color(0.85, 0.95, 1.0)
+	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	help.position = Vector3(0, 0.02, -0.75)
+	camera.add_child(help)
+	_show_help(true)
+	get_tree().create_timer(HELP_START_S).timeout.connect(func(): if help.visible and Time.get_ticks_msec() < (HELP_START_S + 1) * 1000: _show_help(false))
+
+	pal_holder = Node3D.new()
+	origin.add_child(pal_holder)
+	palette = Palette.new()
+	pal_holder.add_child(palette)
+	for i in range(TOOLS.size()):
+		palette.add_button(TOOLS[i], TOOLS[i].to_upper(), i % 4, i / 4, "tool")
+	palette.add_button("undo", "UNDO", 2, 1)
+	palette.add_button("snap", "SNAP", 3, 1)
+	palette.add_button("rec", "● REC", 0, 2)
+	palette.add_button("still", "STILL", 1, 2)
+	palette.add_button("save", "SAVE", 2, 2)
+	palette.add_button("help", "HELP", 3, 2)
+	palette.add_button("hide", "HIDE CLOUD", 0, 3)
+	palette.add_button("size-", "SIZE -", 1, 3)
+	palette.add_button("size+", "SIZE +", 2, 3)
+	palette.add_button("opacity", "OPACITY", 3, 3)
+	palette.add_button("clear_cloud", "CLEAR CLOUD", 0, 4, "danger")
+	palette.add_button("clear_objects", "CLEAR OBJ.", 1, 4, "danger")
+	palette.add_button("exit", "EXIT", 2, 4, "danger", 2)
+	palette.pressed.connect(_on_palette)
+	_sync_palette()
 
 
 func _on_session_begun() -> void:
@@ -177,50 +273,135 @@ func _send_cmd(c: String) -> void:
 
 
 func _on_button(action: String, hand: String) -> void:
+	## Digital buttons. Trigger and grip are handled as analog edges in _poll_analog (works with every profile).
 	if hand == "right_hand":
 		match action:
 			"ax_button":
-				_set_tool(TOOLS[(TOOLS.find(tool) + 1) % TOOLS.size()])
-			"trigger_click":
-				if tool == "paint":
-					painting = true
-				elif tool in ["anchor", "box", "path"]:
-					_place()
+				_undo()
 			"by_button":
-				if tool in ["scan", "paint"]:
-					size_idx = (size_idx + 1) % sizes.size()
-					mat.set_shader_parameter("point_size", sizes[size_idx])
-				else:
-					_undo()
-			"grip_click":
+				_set_tool(TOOLS[(TOOLS.find(tool) + 1) % TOOLS.size()])
+			"x_button":
+				_still()
+			"y_button":
+				_show_help(not help.visible)
+			"bumper":
 				_finish()
+			"menu_button":
+				_toggle_palette()
 			"primary_click":
-				snap = not snap
-				_say("surface snap " + ("on" if snap else "off"))
+				_toggle_snap()
 	else:
 		match action:
-			"trigger_click":
-				alpha_idx = (alpha_idx + 1) % alphas.size()
-				mat.set_shader_parameter("alpha", alphas[alpha_idx])
-			"ax_button":
-				cloud.visible = not cloud.visible
-			"by_button":
-				_save()
-			"primary_click":
-				scanning = not scanning
-				_say("scanning " + ("on" if scanning else "paused"))
-			"grip_click":
-				grip_down_ms = Time.get_ticks_msec()
-				grip_stage = 0
+			"dpad_up", "by_button":          # by_button/ax_button: SteamVR Touch emulation (no native profile)
+				_toggle_scan()
+			"dpad_down", "ax_button":
+				_toggle_cloud()
+			"dpad_left":
+				_point_size(-1)
+			"dpad_right":
+				_point_size(1)
+			"view_button", "menu_button":
+				_toggle_palette()
 	_write_ctl()
 
 
-func _on_release(action: String, hand: String) -> void:
-	if hand == "right_hand" and action == "trigger_click":
+func _poll_analog() -> void:
+	## Trigger / grip as buttons with hysteresis from the analog values.
+	for hand in ["left_hand", "right_hand"]:
+		var c: XRController3D = ctrl[hand]
+		for a in ["trigger", "grip"]:
+			var v := c.get_float(a)
+			var key: String = hand + "/" + a
+			var was: bool = analog.get(key, false)
+			var now := v > 0.6 if not was else v > 0.35
+			if now != was:
+				analog[key] = now
+				if now:
+					_analog_pressed(hand, a)
+				else:
+					_analog_released(hand, a)
+
+
+func _analog_pressed(hand: String, a: String) -> void:
+	if hand == "right_hand" and a == "trigger":
+		if pal_hit != null:
+			var id := palette.press()
+			_buzz("right_hand", 0.3 if id != "" else 0.15, 0.03)
+			return
+		if tool == "paint":
+			painting = true
+		elif tool in MODELING:
+			_place()
+	elif hand == "right_hand" and a == "grip":
+		_finish()
+	elif hand == "left_hand" and a == "trigger":
+		peeking = true
+		_apply_cloud_visibility()
+	_write_ctl()
+
+
+func _analog_released(hand: String, a: String) -> void:
+	if hand == "right_hand" and a == "trigger":
 		painting = false
-	if hand == "left_hand" and action == "grip_click":
-		grip_down_ms = -1
+	elif hand == "left_hand" and a == "trigger":
+		peeking = false
+		_apply_cloud_visibility()
 	_write_ctl()
+
+
+func _on_palette(id: String) -> void:
+	if id in TOOLS:
+		_set_tool(id)
+		return
+	match id:
+		"undo":
+			_undo()
+		"snap":
+			_toggle_snap()
+		"rec":
+			_toggle_scan()
+		"still":
+			_still()
+		"save":
+			_save()
+		"help":
+			_show_help(not help.visible)
+		"hide":
+			_toggle_cloud()
+		"size-":
+			_point_size(-1)
+		"size+":
+			_point_size(1)
+		"opacity":
+			alpha = 1.0 if alpha < 0.3 else (alpha - 0.25 if alpha > 0.5 else 0.2)
+			mat.set_shader_parameter("alpha", alpha)
+			_say("opacity %d %%" % int(alpha * 100))
+		"clear_cloud":
+			_send_cmd("reset")
+			cloud.clear()
+			_buzz("right_hand", 0.8, 0.15)
+			_say("cloud cleared")
+		"clear_objects":
+			model.clear_all()
+			pts.clear()
+			model.set_preview("", [], null)
+			_buzz("right_hand", 0.8, 0.15)
+			_say("objects cleared")
+		"exit":
+			_exit()
+	_sync_palette()
+
+
+func _sync_palette() -> void:
+	for t in TOOLS:
+		palette.set_active(t, t == tool)
+	palette.set_active("rec", scanning, Palette.COLS["rec"])
+	palette.set_text("rec", "● REC" if scanning else "■ STOPPED")
+	palette.set_active("snap", snap)
+	palette.set_active("hide", not cloud_shown)
+	palette.set_text("hide", "SHOW CLOUD" if not cloud_shown else "HIDE CLOUD")
+	palette.set_active("help", help.visible)
+	palette.set_title("%s   %s" % [tool.to_upper(), "● REC" if scanning else "■ STOPPED"])
 
 
 func _set_tool(t: String) -> void:
@@ -231,6 +412,65 @@ func _set_tool(t: String) -> void:
 	pts.clear()
 	model.set_preview("", [], null)
 	_say("tool " + tool.to_upper())
+	_sync_palette()
+
+
+func _toggle_scan() -> void:
+	scanning = not scanning
+	_buzz("left_hand", 0.5, 0.06)
+	_say("scan " + ("RECORDING" if scanning else "STOPPED"))
+	_sync_palette()
+
+
+func _toggle_cloud() -> void:
+	cloud_shown = not cloud_shown
+	_apply_cloud_visibility()
+	_sync_palette()
+
+
+func _apply_cloud_visibility() -> void:
+	cloud.visible = cloud_shown and not peeking
+
+
+func _toggle_snap() -> void:
+	snap = not snap
+	_say("surface snap " + ("on" if snap else "off"))
+	_sync_palette()
+
+
+func _toggle_palette() -> void:
+	pal_holder.visible = not pal_holder.visible
+
+
+func _point_size(d: int) -> void:
+	size_idx = clampi(size_idx + d, 0, sizes.size() - 1)
+	mat.set_shader_parameter("point_size", sizes[size_idx])
+	_say("point size %.0f mm" % (sizes[size_idx] * 1000))
+
+
+func _show_help(on: bool) -> void:
+	help.visible = on
+	for h in tips:
+		tips[h].visible = on
+	if palette:
+		_sync_palette()
+
+
+func _still() -> void:
+	_send_cmd("still")
+	still_pending_ms = Time.get_ticks_msec()
+	_buzz("right_hand", 0.6, 0.05)
+	_say("still: capturing ...")
+
+
+func _exit() -> void:
+	_autosave()
+	_say("exit")
+	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)     # tell the server the viewer is gone
+	if f:
+		f.store_string(JSON.stringify({"t_ms": 0, "scan": "off", "cmd": "", "cmd_seq": cmd_seq}))
+		f.close()
+	get_tree().quit()
 
 
 func _cursor() -> Variant:
@@ -254,6 +494,12 @@ func _place() -> void:
 		"anchor":
 			var o := model.add_anchor(p)
 			_say("anchor %s" % o["name"])
+		"measure":
+			pts.append(p)
+			if pts.size() == 2:
+				var o := model.add_measure(pts[0], pts[1])
+				_say("%s %s" % [o.get("name", "measure"), SceneModel.measure_text(pts[0], pts[1]).replace("\n", " ")])
+				pts.clear()
 		"box":
 			pts.append(p)
 			if pts.size() == 4:
@@ -354,7 +600,7 @@ func _save() -> void:
 	d["cloud"] = save_name + ".ply"
 	_write_json(sessions_dir.path_join(save_name + ".json"), d)
 	_send_cmd("save")
-	_buzz("left_hand", 0.6, 0.1)
+	_buzz("right_hand", 0.6, 0.1)
 	_say("saved " + save_name)
 
 
@@ -364,9 +610,27 @@ func _set_ray(hand: String, length: float, color := Color(0.3, 0.9, 1.0)) -> voi
 	var r: MeshInstance3D = rays.get(hand)
 	if r == null:
 		return
-	(r.mesh as BoxMesh).size = Vector3(0.003, 0.003, length)
+	r.visible = length > 0.0
+	(r.mesh as BoxMesh).size = Vector3(0.003, 0.003, maxf(length, 0.001))
 	r.position = Vector3(0, 0, -length * 0.5)
 	(r.material_override as StandardMaterial3D).albedo_color = color
+
+
+func _place_palette() -> void:
+	## Float the toolbox 8 cm above the left controller, facing the eyes (readable at any wrist angle).
+	var lc: XRController3D = ctrl["left_hand"]
+	if not lc.get_has_tracking_data():
+		return
+	var t := lc.global_transform
+	var fwd := -t.basis.z
+	fwd.y = 0.0
+	var pos := t.origin + Vector3.UP * 0.09 + fwd.normalized() * 0.03
+	var eye := camera.global_transform.origin
+	if (pos - eye).length() < 0.05:
+		return
+	pal_holder.global_transform = Transform3D(Basis(), pos).looking_at(pos + (pos - eye), Vector3.UP)
+	var size := (palette.bg.mesh as QuadMesh).size
+	palette.position = Vector3(-size.x * 0.5, size.y * 0.5, 0)
 
 
 func _process(delta: float) -> void:
@@ -385,47 +649,63 @@ func _process(delta: float) -> void:
 		srv = _read_json(STATUS_PATH)
 		gnss = _read_json(GNSS_PATH)
 		georef = _read_json(GEOREF_PATH)
+		var n := int(srv.get("stills", 0))
+		if still_pending_ms >= 0 and n != last_stills and last_stills >= 0:
+			_say("still saved: " + String(srv.get("still", "")).get_file())
+			_buzz("right_hand", 0.3, 0.03)
+			still_pending_ms = -1
+		elif still_pending_ms >= 0 and Time.get_ticks_msec() - still_pending_ms > 5000:
+			_say("still: no answer from the server (is pcserver running?)")
+			still_pending_ms = -1
+		last_stills = n
+		var tr = XRServer.get_tracker(&"right_hand")
+		if tr and tr is XRControllerTracker and String(tr.profile) != profile:
+			profile = String(tr.profile)
+			print("PCVIEW controller profile: ", profile)
 
-	# free-placement distance with the right stick
+	_place_palette()
+	_poll_analog()
+
 	var rc: XRController3D = ctrl.get("right_hand")
+	var lc: XRController3D = ctrl.get("left_hand")
 	if rc:
 		var st := rc.get_vector2("primary")
 		if abs(st.y) > 0.3:
 			free_dist = clampf(free_dist * (1.0 + st.y * delta * 1.5), 0.15, 8.0)
+	if lc:
+		var st := lc.get_vector2("primary")
+		if abs(st.y) > 0.3:
+			alpha = clampf(alpha + st.y * delta * 0.8, 0.1, 1.0)
+			mat.set_shader_parameter("alpha", alpha)
 
-	# left grip hold: 1 s clear cloud, 3 s also objects
-	if grip_down_ms >= 0:
-		var held := (Time.get_ticks_msec() - grip_down_ms) / 1000.0
-		if held > 1.0 and grip_stage == 0:
-			grip_stage = 1
-			_send_cmd("reset")
-			cloud.clear()
-			_buzz("left_hand", 0.5, 0.08)
-			_say("cloud cleared (keep holding 2 s to clear objects)")
-		elif held > 3.0 and grip_stage == 1:
-			grip_stage = 2
-			model.clear_all()
-			pts.clear()
-			_buzz("left_hand", 1.0, 0.2)
-			_say("objects cleared")
-
-	# ray, reticle, preview
-	var modeling: bool = tool in ["anchor", "box", "path"]
-	var cur = _cursor() if modeling else null
-	if rc and cur != null:
-		var on_surface: bool = snap and hit.get("hit", false) and Time.get_ticks_msec() - hit_rx_ms < 500
+	# right ray: toolbox first, then the tool cursor
+	pal_hit = null
+	if rc and rc.get_has_tracking_data():
+		var t := rc.global_transform
+		pal_hit = palette.ray_hit(t.origin, -t.basis.z)
+	var modeling: bool = tool in MODELING
+	if pal_hit != null:
 		reticle.visible = true
-		reticle.position = cur
-		ret_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.95) if on_surface else Color(1.0, 0.6, 0.1, 0.95)
-		_set_ray("right_hand", (cur - rc.global_transform.origin).length(), Color(0.6, 1.0, 0.6) if on_surface else Color(1.0, 0.7, 0.3))
-		if tool in ["box", "path"]:
-			model.set_preview(tool, pts, cur)
+		reticle.position = pal_hit["point"]
+		ret_mat.albedo_color = Color(0.5, 0.8, 1.0, 0.95)
+		_set_ray("right_hand", pal_hit["dist"], Color(0.5, 0.8, 1.0))
+		model.set_preview("", [], null)
 	else:
-		reticle.visible = false
-		if tool == "paint":
-			_set_ray("right_hand", 2.0 if painting else 0.3, Color(1.0, 0.25, 0.2) if painting else Color(1.0, 0.6, 0.1))
+		var cur = _cursor() if modeling else null
+		if rc and cur != null:
+			var on_surface: bool = snap and hit.get("hit", false) and Time.get_ticks_msec() - hit_rx_ms < 500
+			reticle.visible = true
+			reticle.position = cur
+			ret_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.95) if on_surface else Color(1.0, 0.6, 0.1, 0.95)
+			_set_ray("right_hand", (cur - rc.global_transform.origin).length(), Color(0.6, 1.0, 0.6) if on_surface else Color(1.0, 0.7, 0.3))
+			if tool in ["box", "path", "measure"]:
+				model.set_preview(tool, pts, cur)
 		else:
-			_set_ray("right_hand", 0.3)
+			reticle.visible = false
+			if tool == "paint":
+				_set_ray("right_hand", 2.0 if painting else 0.3, Color(1.0, 0.25, 0.2) if painting else Color(1.0, 0.6, 0.1))
+			else:
+				_set_ray("right_hand", 0.3)
 
 	_update_status()
 
@@ -433,31 +713,36 @@ func _process(delta: float) -> void:
 func _hint() -> String:
 	match tool:
 		"scan":
-			return "A: next tool  B: point size"
+			return "look around to scan   B: next tool"
 		"paint":
-			return "hold trigger to capture"
+			return "hold trigger to capture where you point"
+		"measure":
+			return "trigger: %s   A: undo" % ["start point", "end point"][mini(pts.size(), 1)]
 		"anchor":
-			return "trigger: place anchor  B: undo"
+			return "trigger: place anchor   A: undo"
 		"box":
 			var steps := ["corner 1", "corner 2 (first edge)", "width (or grip: panel)", "height"]
-			return "trigger: %s  B: undo" % steps[mini(pts.size(), 3)]
+			return "trigger: %s   A: undo" % steps[mini(pts.size(), 3)]
 		"path":
-			return "trigger: add point (%d)  grip: finish  B: undo" % pts.size()
+			return "trigger: add point (%d)   grip: finish   A: undo" % pts.size()
 	return ""
 
 
 func _update_status() -> void:
 	var lines := []
 	var age := (Time.get_ticks_msec() - cloud.last_update_ms) / 1000.0 if cloud.last_update_ms > 0 else -1.0
-	lines.append("%s%s   %s" % [tool.to_upper(), " (CAPTURING)" if painting else "", _hint()])
-	lines.append("cloud %d pts  age %.1fs  %s %.1f/s   %d fps  objects %d%s" % [cloud.total_points, age,
-		"scan" if scanning else "PAUSED", float(srv.get("fps", 0.0)), Engine.get_frames_per_second(),
+	lines.append("%s  %s%s   %s" % ["● REC" if scanning else "■ STOPPED", tool.to_upper(),
+		" (CAPTURING)" if painting else "", _hint()])
+	lines.append("cloud %d pts  age %.1fs  %.1f fr/s   %d fps  objects %d%s   Y: help" % [cloud.total_points, age,
+		float(srv.get("fps", 0.0)), Engine.get_frames_per_second(),
 		model.objects.size(), "" if cloud.visible else "  (cloud hidden)"])
 	if not gnss.is_empty():
 		var g := "GNSS %s  sats %d  hacc %.2f m" % [gnss.get("fix", "?"), int(gnss.get("sats", 0)), float(gnss.get("hacc", -1))]
 		if georef.get("ok", false):
 			g += "  georef rms %.2f m (n=%d)" % [float(georef.get("rms", 0)), int(georef.get("n", 0))]
 		lines.append(g)
+	if profile != "" and not "frame_controller" in profile:
+		lines.append("controller profile %s (not native Frame: X/Y/D-pad may be limited)" % profile.get_file())
 	if Time.get_ticks_msec() - msg_ms < 4000:
 		lines.append(msg)
 	status.text = "\n".join(lines)

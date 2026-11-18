@@ -10,7 +10,8 @@ Viewer interface (all in /dev/shm, JSON, written atomically):
   pcctl.json    viewer -> server, 10-30 Hz: {t_ms, scan: auto|paint|off, painting, aim[12], cmd, cmd_seq, name}
   pchit.json    server -> viewer, 30 Hz: first TSDF surface along the right controller aim ray
                 {seq, hit, dist, p[3], n[3]}   (picking for anchors / boxes / paths)
-  pcstatus.json server -> viewer, 1 Hz: {fps, points, blocks, scan, saved}
+  pcstatus.json server -> viewer, 1 Hz: {fps, points, blocks, scan, saved, still, stills}
+  commands (cmd + incremented cmd_seq): reset | save (name) | still (stereo still -> captures/stills/, tools/stills.py)
 
 usage: pcserver.py [--scale 0.35] [--voxel 0.02] [--min-frames 4] [--maxdepth 2.5] [--publish-every 1.0]
 """
@@ -22,6 +23,7 @@ from arcshm import ArcShm
 from livestereo import LiveStereo
 from tsdf import TSDF, bin_raw10, cone_pixels
 import pcpub
+import stills
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--scale", type=float, default=0.35)
@@ -93,11 +95,29 @@ while True:   # wait for the frame source (arcgrab or replay_shm.py)
     except (FileNotFoundError, RuntimeError, ValueError): print("waiting for /dev/shm/arcgrab ...", flush=True); time.sleep(1)
 ls = LiveStereo(scale=a.scale, max_depth=a.maxdepth, min_depth=a.min_depth)
 threading.Thread(target=pick_loop, daemon=True).start()
-last_cmd_seq = None; scan = "auto"; saved = ""
+last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
 last_frame = -1; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
 npub = 0
 print(f"pcserver: scale {a.scale} ({ls.size[0]} px), voxel {a.voxel*100:.1f} cm, min frames {a.min_frames}, "
       f"depth {a.min_depth}-{a.maxdepth} m", flush=True)
+
+
+def take_still():
+    global still, n_stills
+    try:
+        still = stills.save_still(s, ls); n_stills += 1
+        print(f"still -> {still}", flush=True)
+    except Exception as e:
+        still = f"failed: {e}"; print("still failed:", e, flush=True)
+    write_status()
+
+
+def write_status(fps=None):
+    write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
+                                 scan=scan, saved=saved, still=still, stills=n_stills))
+
+
+last_fps = 0.0
 
 
 def handle_cmd(ctl):
@@ -114,6 +134,8 @@ def handle_cmd(ctl):
             with lock: P, C, w = ts.extract(min_frames=a.min_frames)
             fn = os.path.join(SAVE_DIR, name + ".ply"); pcpub.write_ply(fn, P, C); saved = fn
             print(f"saved {len(P)} points -> {fn}", flush=True)
+        elif c == "still":
+            threading.Thread(target=take_still, daemon=True).start()
     last_cmd_seq = ctl.get("cmd_seq")
 
 
@@ -128,7 +150,7 @@ try:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if time.monotonic() - t_pub > a.publish_every:
                 t_pub = time.monotonic()
-                write_json(STATUS_PATH, dict(fps=0.0, points=npub, blocks=ts.nblocks, scan=scan, saved=saved))
+                write_status(0.0)
             continue
         try:
             mL, bL = s.latest_packed(0, after_frame=last_frame, timeout=5.0)
@@ -155,7 +177,7 @@ try:
                 P, C, w = ts.extract(min_frames=a.min_frames)
             npub = pcpub.publish(P, C, max_points=a.max_pub, tile=a.tile)
             fps = (len(t_fr[-20:]) - 1) / max(t_fr[-1] - t_fr[-20:][0], 1e-3) if len(t_fr) > 1 else 0.0
-            write_json(STATUS_PATH, dict(fps=round(fps, 1), points=npub, blocks=ts.nblocks, scan=scan, saved=saved))
+            last_fps = fps; write_status(fps)
             print(f"frame {last_frame}: {n_frames} fused ({fps:.1f}/s), stereo {np.mean(tst[-10:])*1000:.0f} ms, "
                   f"tsdf {np.mean(tfu[-10:])*1000:.0f} ms, publish {(time.monotonic()-t_pub)*1000:.0f} ms, "
                   f"{ts.nblocks} blocks, {npub} points, scan {scan}", flush=True)

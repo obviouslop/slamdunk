@@ -12,13 +12,14 @@ const PANEL_THICKNESS := 0.04  # box finished after 3 points (grip) = panel of t
 
 var objects: Array = []        # Dictionaries (serialisable fields only) ...
 var nodes: Array = []          # ... and their visual nodes (same index)
-var counters := {"anchor": 0, "box": 0, "path": 0}
+var counters := {"anchor": 0, "box": 0, "path": 0, "measure": 0}
 var preview: Node3D
 var mat_box: StandardMaterial3D
 var mat_edge: StandardMaterial3D
 var mat_path: StandardMaterial3D
 var mat_anchor: StandardMaterial3D
 var mat_preview: StandardMaterial3D
+var mat_measure: StandardMaterial3D
 
 
 func _init() -> void:
@@ -27,6 +28,7 @@ func _init() -> void:
 	mat_path = _mat(Color(1.0, 0.55, 0.1, 0.75))
 	mat_anchor = _mat(Color(1.0, 0.3, 0.8, 0.95))
 	mat_preview = _mat(Color(1.0, 1.0, 0.3, 0.35))
+	mat_measure = _mat(Color(1.0, 1.0, 0.4, 0.95))
 	preview = Node3D.new()
 	add_child(preview)
 
@@ -117,6 +119,19 @@ func add_path(pts: Array, diameter := 0.02) -> Dictionary:
 	return _add({"type": "path", "name": "Path%d" % counters["path"], "points": pts.duplicate(), "diameter": diameter})
 
 
+func add_measure(a: Vector3, b: Vector3) -> Dictionary:
+	## Tape measure: 2 points; label shows the distance, height difference and horizontal distance.
+	if a.distance_to(b) < 1e-3:
+		return {}
+	counters["measure"] += 1
+	return _add({"type": "measure", "name": "M%d" % counters["measure"], "points": [a, b]})
+
+
+static func measure_text(a: Vector3, b: Vector3) -> String:
+	var d := b - a
+	return "%.3f m\n(dh %+.3f  horiz %.3f)" % [d.length(), d.y, Vector2(d.x, d.z).length()]
+
+
 func remove_last() -> Dictionary:
 	if objects.is_empty():
 		return {}
@@ -132,7 +147,7 @@ func clear_all() -> void:
 		n.queue_free()
 	objects.clear()
 	nodes.clear()
-	counters = {"anchor": 0, "box": 0, "path": 0}
+	counters = {"anchor": 0, "box": 0, "path": 0, "measure": 0}
 	changed.emit()
 
 
@@ -156,7 +171,38 @@ func _build(o: Dictionary, is_preview: bool) -> Node3D:
 			_build_box(root, o, is_preview)
 		"path":
 			_build_path(root, o["points"], o.get("diameter", 0.02), is_preview)
+		"measure":
+			_build_measure(root, o["points"][0], o["points"][1], is_preview)
 	return root
+
+
+func _build_measure(root: Node3D, a: Vector3, b: Vector3, is_preview: bool) -> void:
+	var m := mat_preview if is_preview else mat_measure
+	_build_segment(root, a, b, 0.0025, m)
+	_sphere(root, a, 0.006, m)
+	_sphere(root, b, 0.006, m)
+	_label(root, measure_text(a, b), (a + b) * 0.5 + Vector3(0, 0.05, 0), Color(1.0, 1.0, 0.5))
+
+
+func _build_segment(root: Node3D, a: Vector3, b: Vector3, r: float, m: Material) -> void:
+	var d := b - a
+	if d.length() < 1e-4:
+		return
+	var yv := d.normalized()
+	var ref := Vector3.UP if abs(yv.y) < 0.9 else Vector3.RIGHT
+	var xv := yv.cross(ref).normalized()
+	var zv := xv.cross(yv)
+	var cm := CylinderMesh.new()
+	cm.top_radius = r
+	cm.bottom_radius = r
+	cm.height = d.length()
+	cm.radial_segments = 8
+	cm.rings = 1
+	var mi := MeshInstance3D.new()
+	mi.mesh = cm
+	mi.material_override = m
+	mi.transform = Transform3D(Basis(xv, yv, zv), (a + b) * 0.5)
+	root.add_child(mi)
 
 
 func _label(parent: Node3D, text: String, pos: Vector3, color := Color(1, 1, 1)) -> void:
@@ -285,6 +331,8 @@ func set_preview(kind: String, pts: Array, cursor: Variant) -> void:
 				_build_box(preview, b, true)
 	elif kind == "path" and all.size() >= 2:
 		_build_path(preview, all, 0.02, true)
+	elif kind == "measure" and all.size() >= 2:
+		_build_measure(preview, all[0], all[1], true)
 
 
 # ---------------------------------------------------------------- JSON

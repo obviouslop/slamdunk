@@ -6,7 +6,7 @@
 Writes next to the scene (or into --out):
   <name>.glb          glTF 2.0 binary: point cloud (POINTS + vertex colours, unlit), boxes (real-size
                       meshes, named Box1...), paths (tube meshes, Path1..., extras: points, diameter,
-                      length), anchors (empties A1...). Blender: File > Import > glTF 2.0.
+                      length), measurements (thin tubes M1..., extras: length, dh, horizontal), anchors (empties A1...). Blender: File > Import > glTF 2.0.
   <name>_anchors.csv  anchors: stage xyz (+ ENU and WGS84 lat/lon/h when georeferenced)
 Coordinates: glTF is y-up like the headset's STAGE frame, so by default the export is in STAGE metres.
 --enu (needs a georef in the scene, tools/gnssd.py): x = East, y = Up, z = -North around the georef
@@ -142,6 +142,7 @@ def main():
     elif ply:
         print(f"warning: cloud {ply} not found, exporting objects only")
     m_box = G.material("box", (0.25, 0.75, 1.0, 0.35), blend=True); m_path = G.material("path", (1.0, 0.55, 0.1, 1.0))
+    m_meas = G.material("measure", (1.0, 1.0, 0.3, 1.0))
     rows = []
     for o in sc.get("objects", []):
         t = o["type"]; name = o.get("name", t)
@@ -158,13 +159,17 @@ def main():
             m = G.mesh(name, Pm, Im, Nm, mat=m_box)
             kids.append(G.node(name, m, t=tp(np.array(o["center"], float)), r=Rot.from_matrix(R).as_quat(),
                                extras={"size_m": o["size"], "points_stage": o.get("points", [])}))
-        elif t == "path":
-            pts = tp(np.array(o["points"], float)); d = float(o.get("diameter", 0.02))
+        elif t in ("path", "measure"):
+            pts = tp(np.array(o["points"], float)); d = float(o.get("diameter", 0.02 if t == "path" else 0.005))
             Pm, Nm, Im = tube_mesh(pts, d / 2)
             if len(Pm):
-                m = G.mesh(name, Pm, Im, Nm, mat=m_path)
+                m = G.mesh(name, Pm, Im, Nm, mat=m_path if t == "path" else m_meas)
                 L = float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1)))
-                kids.append(G.node(name, m, extras={"points": pts.round(5).tolist(), "diameter_m": d, "length_m": round(L, 4)}))
+                ex = {"type": t, "points": pts.round(5).tolist(), "diameter_m": d, "length_m": round(L, 4)}
+                if t == "measure":
+                    s = np.array(o["points"], float); ex["dh_m"] = round(float(s[1, 1] - s[0, 1]), 4)
+                    ex["horizontal_m"] = round(float(np.hypot(*(s[1] - s[0])[[0, 2]])), 4)
+                kids.append(G.node(name, m, extras=ex))
     extras = {"frame": "ENU (x=E, y=U, z=-N)" if a.enu else "STAGE (OpenXR) metres, y up", "source": os.path.basename(a.scene)}
     if g: extras["georef"] = g
     fn = os.path.join(outdir, base + ("_enu" if a.enu else "") + ".glb")

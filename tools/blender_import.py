@@ -7,6 +7,7 @@ Creates a collection "<scene name>" with
   PointCloud  mesh vertices + colour attribute "Col"; a Geometry Nodes modifier shows them as points
   Box1...     cube meshes with the real dimensions (object rotation/location, scale 1)
   Path1...    poly curves with bevel = conduit diameter (edit the points, change the bevel)
+  M1...       measurements: 2-point curves, custom property length_m
   A1...       empties (arrows); custom properties lat/lon/h when the scene is georeferenced
 Axes: headset STAGE (x right, y up, z back) -> Blender (x, -z, y), i.e. Blender Z is up.
 --enu (georeferenced scenes): Blender X = East, Y = North, Z = Up around the georef origin.
@@ -109,6 +110,7 @@ def main(args):
             print("point display modifier failed:", e)
 
     m_box = flat_material("PlanBox", (0.25, 0.75, 1.0, 0.35)); m_path = flat_material("PlanPath", (1.0, 0.55, 0.1, 1.0))
+    m_meas = flat_material("PlanMeasure", (1.0, 1.0, 0.3, 1.0))
     for o in sc.get("objects", []):
         typ, nm = o["type"], o.get("name", o["type"])
         if typ == "anchor":
@@ -139,15 +141,17 @@ def main(args):
             ob.matrix_world = M
             ob["size_m"] = list(o["size"])
             col.objects.link(ob)
-        elif typ == "path":
-            pts = tp(o["points"]); d = float(o.get("diameter", 0.02))
+        elif typ in ("path", "measure"):
+            pts = tp(o["points"]); d = float(o.get("diameter", 0.02 if typ == "path" else 0.005))
             cu = bpy.data.curves.new(nm, "CURVE"); cu.dimensions = "3D"
             sp = cu.splines.new("POLY"); sp.points.add(len(pts) - 1)
             for i, p in enumerate(pts):
                 sp.points[i].co = (p[0], p[1], p[2], 1.0)
             cu.bevel_depth = d / 2; cu.bevel_resolution = 3; cu.use_fill_caps = True
-            cu.materials.append(m_path)
+            cu.materials.append(m_path if typ == "path" else m_meas)
             ob = bpy.data.objects.new(nm, cu); ob["diameter_m"] = d; col.objects.link(ob)
+            if typ == "measure":
+                ob["length_m"] = float(np.linalg.norm(pts[1] - pts[0]))
     print(f"imported {name}: {len(sc.get('objects', []))} objects")
 
 
