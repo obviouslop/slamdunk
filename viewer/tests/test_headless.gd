@@ -113,7 +113,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 34, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 35, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()

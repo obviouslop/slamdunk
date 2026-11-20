@@ -11,7 +11,7 @@ A pair is stored when
 So standing still stores nothing, slow walking stores a view every few cm, and revisits of covered space are skipped.
 Stops by itself at `max_gb`.  (The export then picks the final, denser/sparser subset with feature / dwell weighting.)
 """
-import json, os, threading, time
+import json, os, subprocess, sys, threading, time
 import numpy as np
 import cv2
 from arcshm import ArcShm
@@ -23,7 +23,7 @@ class SplatCapture:
     def __init__(self, root="captures/splat", min_dist=0.06, max_hz=3.0, max_gb=6.0, pair_tol=0.012):
         self.root = root; self.min_dist = min_dist; self.max_hz = max_hz; self.max_bytes = max_gb * 1e9; self.pair_tol = pair_tol
         self.enabled = False; self.dir = None; self.n = 0; self.bytes = 0; self.msg = ""
-        self._stop = False; self._thread = None
+        self._stop = False; self._thread = None; self.last_dir = None; self.export = None; self.export_msg = ""
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True); self._thread.start()
@@ -31,9 +31,28 @@ class SplatCapture:
     def stop(self):
         self._stop = True
 
+    def start_export(self, extra=()):
+        """Background tools/export_colmap.py on the latest capture (masks + depth + points from the capture itself) -> <dir>_colmap."""
+        if self.enabled: self.export_msg = "export: switch SPLAT off first"; return False
+        if not self.last_dir or not os.path.exists(os.path.join(self.last_dir, "frames.jsonl")) or self.n < 3:
+            self.export_msg = "export: no splat capture yet"; return False
+        if self.export is not None and self.export.poll() is None: return False
+        out = self.last_dir.rstrip("/") + "_colmap"; here = os.path.dirname(os.path.abspath(__file__))
+        log = open(self.last_dir.rstrip("/") + "_export.log", "w")
+        self.export = subprocess.Popen(["nice", "-n", "10", sys.executable, "-I", os.path.join(here, "export_colmap.py"), self.last_dir, out,
+                                        "--masks", "--depth", *extra], stdout=log, stderr=subprocess.STDOUT)
+        self.export_out = out; self.export_msg = ""; print(f"splat export -> {out}", flush=True); return True
+
+    def export_state(self):
+        if self.export is None: return self.export_msg
+        rc = self.export.poll()
+        if rc is None: return "export: running ..."
+        return f"export: done -> {os.path.basename(self.export_out)}" if rc == 0 else "export: FAILED (see *_export.log)"
+
     def hud(self):
-        if not self.enabled and not self.n: return ""
-        return f"splat: {'REC' if self.enabled else 'idle'} {self.n} views {self.bytes / 1e9:.1f} GB{(' ' + self.msg) if self.msg else ''}"
+        e = self.export_state()
+        if not self.enabled and not self.n: return e
+        return (e + "   " if e else "") + f"splat: {'REC' if self.enabled else 'idle'} {self.n} views {self.bytes / 1e9:.1f} GB{(' ' + self.msg) if self.msg else ''}"
 
     # ---- helpers -------------------------------------------------------------------------------------------------------
     @staticmethod
@@ -55,7 +74,7 @@ class SplatCapture:
         return d.min() > self.min_dist
 
     def _open(self):
-        self.dir = os.path.join(self.root, time.strftime("splat_%Y%m%d_%H%M%S")); os.makedirs(self.dir, exist_ok=True)
+        self.dir = os.path.join(self.root, time.strftime("splat_%Y%m%d_%H%M%S")); os.makedirs(self.dir, exist_ok=True); self.last_dir = self.dir
         s = self.shm
         json.dump(dict(line_px=s.line_px, line_bytes=s.line_bytes, black=s.black, bayer="RGGB", cams=["left", "right"], kind="splat-capture",
                        devices=["/dev/video0 arcimx616 0-001a crop x=550", "/dev/video3 arcimx616 0-0010 crop x=250"]),

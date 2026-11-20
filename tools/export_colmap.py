@@ -13,7 +13,7 @@ usage: export_colmap.py RECDIR OUTDIR [--ply fused.ply] [--fov 110] [--size 1600
   * image selection: drop the blurriest --blur-pct %, then greedy spatial decimation in (position, viewing direction): sharpest
     first, keep an image when no kept view is nearer than a radius that shrinks where there are more features and where more time
     was spent (--density), with the radius tuned to give about --target images.
-  * points3D: optional fused cloud (PLY from pcserver / postprocess) used as the initial Gaussians.
+  * points3D: --ply fused cloud, else the stereo depth points of the exported frames themselves (4 cm voxels seen twice).
 """
 import argparse, json, os, sys
 import numpy as np, cv2
@@ -189,6 +189,7 @@ for s_ in sides:                                                    # fisheye im
 if a.masks or a.depth:
     os.makedirs(os.path.join(a.out, "depth"), exist_ok=True); os.makedirs(os.path.join(a.out, "masks"), exist_ok=True)
 map_pts = None
+auto_pts = not a.ply; auto_P, auto_C = [], []; rng_pts = np.random.default_rng(0)
 if a.masks and a.ply: map_pts = read_ply(a.ply)[0]
 fcache = {}
 
@@ -209,11 +210,14 @@ def frame_points(i):
     """stereo depth of pair i as world points (and the hand-mask points), cached"""
     if i in fcache: return fcache[i]
     r = by_i[i]; hp = np.array(r["left"]["pose"] if r["left"].get("pose_valid") else r["right"]["pose"])      # head pose of the exposure
-    Zr, _, _ = ls.depth(load("left", i), load("right", i), far=4.0, half=False)
+    Zr, rgbr, _ = ls.depth(load("left", i), load("right", i), far=4.0, half=False)
     W = ls.world_from_rect(hp)
     vv, uu = np.nonzero(Zr > 0); z = Zr[vv, uu]
     Pr = np.stack([(uu - ls.P1[0, 2]) * z / ls.f, (vv - ls.P1[1, 2]) * z / ls.f, z], 1)
     Pw = Pr @ W[:3, :3].T + W[:3, 3]
+    if auto_pts:                                                         # initial points from the capture itself (no fused cloud given)
+        k = rng_pts.choice(len(Pw), min(len(Pw), 20000), replace=False)
+        auto_P.append(Pw[k].astype(np.float32)); auto_C.append(rgbr[vv[k], uu[k]])
     hw = np.zeros((0, 3))
     if tracks:
         hands = []
@@ -257,6 +261,7 @@ with open(os.path.join(sp, "images.txt"), "w") as fi:
         if UP[s][0] is not None: im = cv2.rotate(im, UP[s][0])
         name = f"{s}_{i:05d}.jpg"; cv2.imwrite(os.path.join(img_dir, name), im, [cv2.IMWRITE_JPEG_QUALITY, 95])
         if a.masks or a.depth: depth_and_mask(s, i, T)
+        elif auto_pts: frame_points(i)
         Tc = np.linalg.inv(T)                                   # world-to-camera
         q = qvec(Tc[:3, :3]); t = Tc[:3, 3]
         fi.write(f"{n} {q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {q[3]:.9f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} {cam_id[s]} {name}\n\n")
@@ -270,6 +275,15 @@ with open(os.path.join(sp, "points3D.txt"), "w") as fp:
         P, C = read_ply(a.ply)
         if len(P) > a.max_points:
             k = np.random.default_rng(0).choice(len(P), a.max_points, replace=False); P, C = P[k], C[k]
+        for k in range(len(P)):
+            fp.write(f"{k+1} {P[k,0]:.4f} {P[k,1]:.4f} {P[k,2]:.4f} {C[k,0]} {C[k,1]} {C[k,2]} 1.0\n")
+        npts = len(P)
+    elif auto_P:        # stereo points of all exported frames, 4 cm voxels seen at least twice (drops noise), capped
+        P = np.vstack(auto_P); C = np.vstack(auto_C)
+        g = np.floor(P / 0.04).astype(np.int64) + 50000; key = (g[:, 0] << 40) | (g[:, 1] << 20) | g[:, 2]
+        _, idx, cnt = np.unique(key, return_index=True, return_counts=True); k = idx[cnt >= 2]
+        P, C = P[k], C[k]
+        if len(P) > a.max_points: k = rng_pts.choice(len(P), a.max_points, replace=False); P, C = P[k], C[k]
         for k in range(len(P)):
             fp.write(f"{k+1} {P[k,0]:.4f} {P[k,1]:.4f} {P[k,2]:.4f} {C[k,0]} {C[k,1]} {C[k,2]} 1.0\n")
         npts = len(P)

@@ -777,3 +777,7 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   median), synchronous pair, and a *new view* (no stored view within --splat-min-dist 0.06 m + 0.5 m/rad), max 3 pairs/s, stops by itself at
   --splat-gb 6 (~15 MB/pair, ~400 pairs). The exporter's feature/dwell-weighted spatial decimation then picks the final subset. HUD shows
   "splat: REC n views x GB". `--no-splat` disables. Disk writes are on the Frame's disk (not /tmp). Tested with replay; not in the headset.
+- EXPORT SPLAT (toolbox row 8): switches SPLAT off and sends cmd `splat_export`; pcserver runs (nice 10, background) tools/export_colmap.py on the
+  latest captures/splat/splat_<t> with --masks --depth -> splat_<t>_colmap/ (+ splat_<t>_export.log); the status line shows
+  "export: running / done -> dir / FAILED". export_colmap without --ply now builds points3D from the stereo depth of the exported frames
+  (4 cm voxels seen >= 2x), so a capture is self-contained. Viewer test needs /dev/shm/pointcloud.bin to exist (tile test).

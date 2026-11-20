@@ -276,6 +276,8 @@ def handle_cmd(ctl):
                                marker_frame="x right, y up, z out of the paper, origin at the marker centre",
                                time_range=[float(tt.min()), float(tt.max())] if len(tt) else None), open(fn + ".json", "w"), indent=1)
             print(f"saved {len(P)} points -> {fn}", flush=True)
+        elif c == "splat_export":
+            if splatcap: splatcap.start_export()
         elif c == "still":
             threading.Thread(target=take_still, daemon=True).start()
     last_cmd_seq = ctl.get("cmd_seq")

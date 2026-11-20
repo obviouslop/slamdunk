@@ -314,6 +314,7 @@ func _build_scene() -> void:
 	palette.add_button("far", "FAR", 1, 7)
 	palette.add_button("planes", "PLANES", 2, 7)
 	palette.add_button("splat", "◉ SPLAT", 3, 7)
+	palette.add_button("splat_export", "EXPORT SPLAT", 3, 8)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -606,6 +607,13 @@ func _on_palette(id: String) -> void:
 			tag_layer.visible = tags_on
 			_say("tag labels ON: QR text + fiducial axes / IDs" if tags_on else "tag labels off")
 			_write_ctl()
+			_sync_palette()
+		"splat_export":
+			if splat_on:
+				splat_on = false
+				_write_ctl()
+			_send_cmd("splat_export")
+			_say("splat export started: masks + depth + COLMAP dataset (see the status line)")
 			_sync_palette()
 		"splat":
 			splat_on = not splat_on
