@@ -33,7 +33,7 @@ ap.add_argument("--delta", type=float, default=0.0, help="time offset (ms) added
 ap.add_argument("--refit", action="store_true"); ap.add_argument("--write-corrected", action="store_true")
 ap.add_argument("--anchors", default="all", help="boards used for the correction: all | origin | cal")
 ap.add_argument("--cluster", type=float, default=0.35, help="m: detections of one physical board lie within this radius in STAGE")
-ap.add_argument("--origin-mm", type=float, help="edge of the id 4 marker (default tools/fiducials.ORIGIN_MM)")
+ap.add_argument("--origin-mm", type=float, help="edge of the id 4 marker (default 150)")
 a = ap.parse_args()
 if a.origin_mm: F.BOARDS["origin"]["tag_mm"] = a.origin_mm
 out = os.path.join(a.rec, "fid"); os.makedirs(out, exist_ok=True)

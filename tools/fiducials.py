@@ -29,7 +29,7 @@ NBITS, MAXHAM = 41, 12                          # min distance of the family is 
 CELL_Q = np.array([[2, 2], [7, 2], [7, 7], [2, 7]], np.float32)          # TL TR BR BL of the white 5x5 square, in cells
 
 TAG_MM = 50.0                                   # printed size of the calibration markers (9x9 image)
-ORIGIN_MM = 50.0                                # id 4 origin marker (change when printed differently)
+ORIGIN_MM = 150.0                               # id 4 origin marker: 150 mm printed edge (full 9x9 image)
 BOARDS = {
     "cal": {"tag_mm": TAG_MM, "centres_mm": {0: (-75, 100), 1: (75, 100), 2: (75, -100), 3: (-75, -100)}},   # board x right, y up
     "origin": {"tag_mm": ORIGIN_MM, "centres_mm": {4: (0, 0)}},

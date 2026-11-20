@@ -594,11 +594,11 @@ TODO: depth-correct own passthrough (user approved).
   as tools/data/tag41h12.json; nothing from that repo is executed). Quad = the white 5x5 square inside the black ring
   (edge = 5/9 of the printed 9x9 size). Corner order TL TR BR BL, marker frame x right / y up / z out of the paper.
   Boards: "cal" ids 0-3 (0 TL, 1 TR, 2 BR, 3 BL, 150 x 200 mm centre to centre, 50 mm markers - verified against the
-  SVG), "origin" id 4 (edge ORIGIN_MM = 50, change when printed). Several physical copies of the cal board
+  SVG), "origin" id 4 (edge ORIGIN_MM = 150, as printed). Several physical copies of the cal board
   (ceiling / floor / table) share ids: told apart by position in STAGE (group_boards).
 - A single small tag has two near-equal pose solutions (flip): solve_pose_all returns both, `prior=` resolves it, the
   ambiguity ratio gates the unreliable ones. 4-tag boards are unambiguous and ~10x more accurate: use the cal board for
-  measurements, and consider a bigger / multi-tag origin marker (50 mm at 1232 px binned is detectable to ~1 m only).
+  measurements, and the 150 mm origin marker is detectable at 1232 px binned out to ~3 m.
 - re/test_fiducials.py (synthetic renders: 0.2-0.6 mm / 0.02-0.17 deg), re/make_fid_rec.py (synthetic recording
   through the real fisheye calibration with an injected tracker drift) -> tools/fid_analyze.py recovers it.
 - tools/fid_analyze.py RECDIR: full-resolution detection; (1) tracker pose error from the spread of immobile boards
