@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Stereo still capture: the newest synchronised Arcturus pair + pose + timestamps (+ GNSS / georeference).
+"""Stereo still capture: the newest synchronised Arcturus pair + pose + timestamps (+ GNSS / georeference) in ONE multi-page TIFF.
 
 Writes captures/stills/<YYYYmmdd_HHMMSS_mmm>/
-  left.jpg, right.jpg   full-resolution colour (2464^2, demosaiced, white-balanced, rotated upright), EXIF: DateTimeOriginal +
-                        SubSec + OffsetTime, Make/Model, GPS (lat/lon/alt/time/img direction) when available,
-                        UserComment = compact JSON {t_utc, ts, pose (camera-to-STAGE 3x4), lla, side}
-  left.y10p, right.y10p raw RAW10 sensor lines (lossless; tools/arcshm.py unpack / tools/livestereo.unpack_raw)
-  meta.json             everything: per-camera metadata (frame, ts CLOCK_MONOTONIC, exposure, gain), HMD pose,
-                        camera-to-STAGE poses for the raw sensor (stage_from_cam, matches the factory
-                        calibration) and for the upright JPEG (stage_from_cam_jpg, jpg_rotation), calibration file, GNSS fix, georeference, camera lat/lon/h
+  still.tiff   multi-page TIFF (tools/tiffmulti.py; libtiff-readable: tiffinfo / tiffcp / ImageMagick / GIMP):
+                 page 0  left   full-resolution colour (2464^2, demosaiced, white-balanced, upright), JPEG compressed;
+                                 ImageDescription = ALL metadata as JSON (capture, poses, calibration, depth model, GNSS, lla ...),
+                                 plus Make / Model / DateTime tags (tifffile cannot write Exif / GPS sub-IFDs: GPS is in the JSON)
+                 page 1  right  same for the right camera
+                 page 2  rectified left colour (the geometry of the depth map), JPEG
+                 page 3  rectified right colour (row-aligned with page 2: a ready stereo pair), JPEG
+                 page 4  depth map: float32 metres in the rectified-left geometry (0 = invalid), deflate; description gives
+                         intrinsics, stage_from_rect and the depth model
+                 page 5  composited headset view (what you saw incl. cloud / HUD), JPEG - APPENDED a moment later: the file is written
+                         right after the stereo capture, the next composited frame is added when it exists (record sessions:
+                         the next c_*.jpg of composited/; otherwise one frame is grabbed from /dev/video99)
+  left.y10p, right.y10p  raw RAW10 sensor lines (lossless; tools/arcshm.py unpack / tools/livestereo.unpack_raw)
+  meta.json    the same metadata as page 0 (poses: stage_from_cam for the raw sensor and stage_from_cam_jpg for the upright JPEG)
 Used by tools/pcserver.py (viewer command "still"); standalone:  stills.py [--out DIR]  (needs arcgrab running)
-Re-render the JPGs of existing stills from their raw files:  stills.py --regen DIR...
+Legacy stills (left.jpg / right.jpg): re-render the JPGs from their raw files:  stills.py --regen DIR...
 """
 import json, os, struct, sys, time, datetime
 import numpy as np
@@ -142,9 +149,89 @@ def upright(ls, side):
     return None, np.eye(3), "none"
 
 
+def _write_page(path, arr, role, desc, name=None, dt=None, make=None, model=None, append=False, jpeg=True, quality=92):
+    """One TIFF page via tifffile: JPEG-compressed colour (arr RGB uint8) or lossless deflate (float depth). The ImageDescription of
+    every page is JSON (role + what is needed to interpret it)."""
+    import tifffile
+    tags = [(285, "s", 0, name or role, True)]
+    if make: tags.append((271, "s", 0, make, True))
+    if model: tags.append((272, "s", 0, model, True))
+    if dt: tags.append((306, "s", 0, dt, True))
+    kw = dict(compression="jpeg", compressionargs={"level": quality}, photometric="rgb") if jpeg else dict(compression="zlib", photometric="minisblack")
+    tifffile.imwrite(path, arr, append=append, description=json.dumps(desc, separators=(",", ":")), metadata=None, software="pcstill/2 (tools/stills.py)",
+                     extratags=tags, **kw)
+
+
+# ------------------------------------------------------------------ composited headset view (next frame after the trigger)
+
+def _active_composited_dir():
+    """The composited/ dir of a running `pcsession.sh --record` (a c_*.jpg written within the last 3 s), else None."""
+    import glob
+    best = None
+    for d in glob.glob(os.path.join(HERE, "..", "captures", "live*", "composited")):
+        fs = glob.glob(os.path.join(d, "c_*.jpg"))
+        if fs:
+            m = max(os.path.getmtime(f) for f in fs)
+            if time.time() - m < 3.0 and (best is None or m > best[0]): best = (m, d)
+    return best[1] if best else None
+
+
+def composited_frame(t_after, timeout=4.0, tmp_dir=None, device="/dev/video99"):
+    """The first composited headset frame captured after wall-clock time t_after -> (jpeg bytes, source, t_file) or (None, reason, None).
+    Recording session: the next file of composited/. Otherwise a single frame is read from the SteamVR mirror device."""
+    import glob, subprocess
+    t_end = time.time() + timeout
+    d = _active_composited_dir()
+    if d:
+        while time.time() < t_end:
+            fs = sorted((os.path.getmtime(f), f) for f in glob.glob(os.path.join(d, "c_*.jpg")))
+            fs = [x for x in fs if x[0] > t_after]
+            if fs:
+                m, f = fs[0]; time.sleep(0.03)
+                b = open(f, "rb").read()
+                if b[-2:] == b"\xff\xd9": return b, "record:" + os.path.basename(f), m
+            time.sleep(0.03)
+        return None, "no composited frame within %.0f s" % timeout, None
+    tmp = os.path.join(tmp_dir or os.path.join(HERE, "..", "captures", "scratch"), "composited_grab_%d.jpg" % os.getpid())
+    os.makedirs(os.path.dirname(tmp), exist_ok=True)
+    try:
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-frames:v", "1", "-q:v", "2", "-y", tmp],
+                       timeout=timeout, check=True, capture_output=True)
+        t = time.time(); b = open(tmp, "rb").read(); os.remove(tmp)
+        return b, "ffmpeg:" + device, t
+    except Exception as e:
+        return None, f"ffmpeg grab failed: {e}", None
+
+
+def _append_composited(d, tiff_path, t_trigger, ready, meta):
+    try:
+        b, src, t_file = composited_frame(t_trigger)
+        ready.wait(10.0)
+        if b is None:
+            meta["composited"] = {"error": src}
+        else:
+            img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)[..., ::-1]
+            desc = {"role": "composited", "what": "headset composited view (SteamVR mirror: passthrough + viewer overlay), re-compressed as JPEG q92",
+                    "source": src, "captured_utc": datetime.datetime.fromtimestamp(t_file, datetime.timezone.utc).isoformat(),
+                    "after_trigger_s": round(t_file - t_trigger, 3)}
+            _write_page(tiff_path, np.ascontiguousarray(img), "composited", desc, append=True)
+            meta["composited"] = {k: desc[k] for k in ("source", "captured_utc", "after_trigger_s")}
+    except Exception as e:
+        meta["composited"] = {"error": str(e)}
+    try:
+        with open(os.path.join(d, "meta.json"), "w") as f: json.dump(meta, f, indent=1)
+    except OSError:
+        pass
+
+
+# ------------------------------------------------------------------ capture
+
 def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_path="/dev/shm/georef.json",
-               pair_tol=0.015, timeout=2.0):
-    """Grab the newest synchronised pair from ArcShm `shm` and write a still directory. Returns its path."""
+               pair_tol=0.015, timeout=2.0, composited=True):
+    """Grab the newest synchronised pair from ArcShm `shm` and write a still directory with still.tiff. Returns its path.
+    The stereo frames are taken first (small capture delay); everything else, incl. the composited view, follows."""
+    import threading
+    from tsdf import bin_raw10
     t_wall = time.time()
     t_end = time.monotonic() + timeout
     while True:
@@ -152,6 +239,7 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
         mR, bR = shm.latest_packed(1, after_frame=mL["frame"] - 2, timeout=timeout)
         if abs(mL["ts"] - mR["ts"]) <= pair_tol or time.monotonic() > t_end:
             break
+    ready = threading.Event(); meta = {}
     # wall-clock time of the exposure: shift "now" by the monotonic age of the frame
     age = time.monotonic() - mL["ts"]
     t_utc = t_wall - max(age, 0.0)
@@ -173,19 +261,29 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
     elif gnss.get("q"):
         for side in ("left", "right"):
             lla[side] = dict(lat=gnss["lat"], lon=gnss["lon"], h=gnss["h"], source="gnss_antenna (no georef yet)")
-    meta = {"format": "pcstill/1", "t_utc": t_utc, "t_utc_iso": datetime.datetime.fromtimestamp(t_utc, datetime.timezone.utc).isoformat(),
+    try:
+        calib = json.load(open(CAL)); cams = [c for c in calib["cameras"] if c.get("sourceCamera") in ("passthrough_left", "passthrough_right")]
+        calibration = {"file": os.path.relpath(CAL, os.path.dirname(d)), "cameras": cams}
+    except Exception:
+        calibration = {"file": os.path.relpath(CAL, os.path.dirname(d))}
+    meta.update({"format": "pcstill/2", "t_utc": t_utc, "t_utc_iso": datetime.datetime.fromtimestamp(t_utc, datetime.timezone.utc).isoformat(),
+            "trigger_wall_time": t_wall, "capture_delay_s": round(age, 4),
             "clock": "ts = CLOCK_MONOTONIC (s) at mid-exposure as stamped by src/arcgrab; poses = OpenVR Standing == OpenXR STAGE",
             "left": {k: mL[k] for k in ("frame", "ts", "exp_lines", "gain_code", "dgain", "pose_valid")},
             "right": {k: mR[k] for k in ("frame", "ts", "exp_lines", "gain_code", "dgain", "pose_valid")},
             "hmd_pose": np.asarray(mL["pose"]).tolist(),
             "stage_from_cam": {"left": TL.tolist(), "right": TR.tolist(),
-                               "axes": "OpenCV camera (x right, y down, z forward), metres"},
+                               "axes": "OpenCV camera (x right, y down, z forward), metres; raw sensor orientation"},
             "stage_from_cam_jpg": {}, "jpg_rotation": {},
-            "calibration": os.path.relpath(CAL, os.path.dirname(d)),
+            "calibration": calibration,
             "raw": {"width": shm.line_px, "line_bytes": shm.line_bytes, "skip_lines": shm.skip, "black": shm.black,
                     "bayer": "RGGB", "format": "RAW10 packed (MIPI)"},
             "gnss": gnss, "georef": georef, "lla": lla,
-            }
+            "tiff_pages": ["left (JPEG, upright)", "right (JPEG, upright)", "rectified left (JPEG)", "rectified right (JPEG)", "depth (float32 m, rectified left)",
+                           "composited headset view (JPEG, appended later)"]})
+    if composited:      # starts waiting for the next composited frame right away; appends once still.tiff exists
+        threading.Thread(target=_append_composited, args=(d, os.path.join(d, "still.tiff"), t_wall, ready, meta), daemon=True).start()
+    imgs, descs = {}, {}
     for side, m, b, T in (("left", mL, bL, TL), ("right", mR, bR, TR)):
         with open(os.path.join(d, side + ".y10p"), "wb") as f:
             f.write(b)
@@ -197,20 +295,41 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
             img = cv2.rotate(img, rot)
         Tj = T.copy(); Tj[:3, :3] = T[:3, :3] @ R_on
         meta["stage_from_cam_jpg"][side] = Tj.tolist(); meta["jpg_rotation"][side] = rname
-        T = Tj
-        com = json.dumps({"t_utc": round(t_utc, 4), "ts": m["ts"], "side": side, "stage_from_cam": np.round(T[:3], 5).tolist(),
+        com = json.dumps({"t_utc": round(t_utc, 4), "ts": m["ts"], "side": side, "stage_from_cam": np.round(Tj[:3], 5).tolist(),
                           "lla": lla.get(side)}, separators=(",", ":"))
         gps = None
         L = lla.get(side)
         if L:
             gps = dict(lat=L["lat"], lon=L["lon"], h=L["h"], utc=datetime.datetime.fromtimestamp(t_utc, datetime.timezone.utc),
                        dir_deg=L.get("heading_deg"), hacc=gnss.get("hacc"))
-        app1 = exif_bytes(dt.strftime("%Y:%m:%d %H:%M:%S"), f"{dt.microsecond // 1000:03d}", dt.strftime("%z")[:3] + ":" + dt.strftime("%z")[3:],
-                          "Valve", f"Steam Frame passthrough {side}", com, gps, desc=f"pcstill {name} {side}")
-        with open(os.path.join(d, side + ".jpg"), "wb") as f:
-            f.write(jpeg_with_exif(img, app1))
+        imgs[side] = np.ascontiguousarray(img[..., ::-1])
+        descs[side] = {"role": side, "what": f"{side} camera, full resolution colour, upright ({rname} from the sensor)", "stage_from_cam": Tj.tolist(),
+                       "frame": m["frame"], "ts": m["ts"], "lla": lla.get(side)}
+    # depth map in the rectified-left geometry (same pipeline as the live fusion)
+    kw = dict(W=shm.line_px, stride=shm.line_bytes, skip=shm.skip, black=float(shm.black), threads=2)
+    Hh = min(len(bL) // shm.line_bytes - shm.skip, shm.line_px)
+    cLh, cRh = bin_raw10(bL, H=Hh, **kw), bin_raw10(bR, H=Hh, **kw)
+    Z, _, _ = ls.depth(cLh, cRh, far=4.0, half=True)
+    rgbL, rgbR = ls.rectified_rgb_pair(cLh, cRh, half=True)
+    Wr = ls.world_from_rect(mL["pose"])
+    geom = {"intrinsics_rect": {"f": float(ls.f), "cx": float(ls.P1[0, 2]), "cy": float(ls.P1[1, 2]), "size": list(ls.size)},
+            "stage_from_rect": Wr.tolist(), "rect_axes": "OpenCV (x right, y down, z forward)", "baseline_m": float(ls.baseline),
+            "depth_model": "Z = k*f*B/(disparity + d0), disparity at this resolution", "k": float(getattr(ls, "k", 1.0)), "d0_px": float(getattr(ls, "d0", 0.0)),
+            "R1": ls.R1.tolist(), "R2": ls.R2.tolist(), "P1": ls.P1.tolist(), "P2": ls.P2.tolist(),
+            "K_left": ls.KL.tolist(), "D_left": ls.DL.ravel().tolist(), "K_right": ls.KR.tolist(), "D_right": ls.DR.ravel().tolist(),
+            "R_right_from_left": ls.R.tolist(), "t_right_from_left": ls.t.tolist(), "head_from_camL": ls.head_from_camL.tolist()}
+    meta["geometry"] = geom
+    dt_s = dt.strftime("%Y:%m:%d %H:%M:%S")
+    tp = os.path.join(d, "still.tiff")
+    for k, side in enumerate(("left", "right")):
+        desc = descs[side] if side == "right" else dict(descs[side], metadata=meta)           # page 0 carries ALL metadata
+        _write_page(tp, imgs[side], side, desc, dt=dt_s, make="Valve", model=f"Steam Frame passthrough {side}", append=k > 0)
+    _write_page(tp, rgbL, "rect_left", dict(role="rect_left", what="rectified left colour (geometry of the depth page)", **geom), append=True)
+    _write_page(tp, rgbR, "rect_right", dict(role="rect_right", what="rectified right colour: row-aligned with rect_left, disparity = x_left - x_right", **geom), append=True)
+    _write_page(tp, Z.astype(np.float32), "depth", dict(role="depth", units="m", invalid=0, what="stereo depth, rectified left geometry", **geom), append=True, jpeg=False)
     with open(os.path.join(d, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)
+    ready.set()                                  # (the composited thread appends its page and rewrites meta.json after this)
     return d
 
 
@@ -245,4 +364,4 @@ if __name__ == "__main__":
     from arcshm import ArcShm
     from livestereo import LiveStereo
     ap = argparse.ArgumentParser(); ap.add_argument("--out", default=OUT); a = ap.parse_args()
-    print(save_still(ArcShm(), LiveStereo(scale=0.25), a.out))
+    print(save_still(ArcShm(), LiveStereo(scale=0.35), a.out))

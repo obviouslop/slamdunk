@@ -663,3 +663,18 @@ TODO: depth-correct own passthrough (user approved).
 - Occlusion lag: the mask used to be published after the full-res stereo + from a ~4 fps loop (age 0.2-0.4 s). Now its own thread
   in pcserver (occ_loop, --occ-hz 15): own frame reader, low-res stereo (scale 0.2: 49 ms vs 107 ms, 2.3 % median depth difference),
   published independently of fusion. Not yet exercised live (written while the live19 session was running).
+
+## 2026-11-20 still capture -> one TIFF, STILL button, stereo viewer
+- tools/stills.py now writes captures/stills/<time>/still.tiff (tifffile + imagecodecs; was left.jpg + right.jpg): pages left / right
+  (full-res upright JPEG q92), rect_left / rect_right (862^2 rectified, a ready stereo pair), depth (float32 m, rectified-left
+  geometry, deflate), composited (headset view, JPEG, APPENDED when the next composited frame exists). Every page's ImageDescription is
+  JSON; page 0 carries ALL metadata (capture, poses, embedded calibration, rectification, depth model, GNSS / lla). Make / Model /
+  DateTime tags are set; tifffile and Pillow cannot write Exif / GPS sub-IFDs, so GPS lives in the JSON. Raw .y10p + meta.json stay.
+- Capture delay is unchanged (the pair is grabbed first; saving takes ~1.1 s after that); the composited thread starts at the trigger:
+  in a --record session it waits for the next composited/c_*.jpg newer than the trigger, otherwise it grabs ONE frame from
+  /dev/video99 with ffmpeg (not exercised yet: tested with a simulated composited dir -> next frame picked, older one skipped).
+- Viewer: left bumper (or left X) = STILL, no toolbox needed (right X still works).
+- tools/stillview.py still.tiff [--open]: self-contained HTML viewer - anaglyph (red-cyan, convergence shift), side-by-side
+  parallel / cross-eyed, blink, left / right upright, depth overlay, composited; click = stereo depth + camera / STAGE
+  coordinates, two clicks = distance. Syntax-checked with node, NOT yet tried in a browser (no browser here).
+- Lesson: libraries can simply be installed (uv pip install --python .venv/bin/python PKG); the venv has no pip.

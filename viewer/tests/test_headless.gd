@@ -128,6 +128,10 @@ func _late_b() -> void:
 	inst.call("_on_button", "x_button", "right_hand")
 	var ctl = JSON.parse_string(FileAccess.get_file_as_string(inst.get("CTL_PATH")))
 	check(ctl["cmd"] == "still" and int(ctl["cmd_seq"]) == seq + 1, "X sends still command")
+	seq = inst.get("cmd_seq")
+	inst.call("_on_button", "bumper", "left_hand")
+	ctl = JSON.parse_string(FileAccess.get_file_as_string(inst.get("CTL_PATH")))
+	check(ctl["cmd"] == "still" and int(ctl["cmd_seq"]) == seq + 1, "left bumper sends still command (dedicated STILL button)")
 	ip.hovered = "paint"
 	inst.set("pal_hit", {"id": "paint"})
 	inst.call("_on_button", "trigger_click", "right_hand")

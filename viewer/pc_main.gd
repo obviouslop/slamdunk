@@ -42,6 +42,7 @@ const HELP_TEXT := """POINT CLOUD PLANNER - HELP (Y: close)
 
 RIGHT HAND (tools)
   bumper ...... click: toolbox button / place point
+  left bumper . STILL: stereo capture (still.tiff) + next composited headset frame, no toolbox needed
   A ........... undo (last point, else last object)
   B ........... next tool
   X ........... stereo still (pair + pose + time + GNSS)
@@ -210,7 +211,7 @@ func _build_scene() -> void:
 		tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 		tip.position = Vector3(0.09 if hand == "right_hand" else -0.09, -0.02, 0.06)
 		tip.text = "bumper: click  trigger: capture\nA undo  B next tool\nX still  Y help  grip: finish" if hand == "right_hand" \
-			else "D-pad ↑ rec/stop  ↓ hide\n← → point size\nView: toolbox  trigger: peek"
+			else "bumper: STILL (stereo capture)\nD-pad ↑ rec/stop  ↓ hide\n← → point size  View: toolbox"
 		tip.visible = false
 		c.add_child(tip)
 		tips[hand] = tip
@@ -463,6 +464,8 @@ func _on_button(action: String, hand: String) -> void:
 				_point_size(1)
 			"view_button", "menu_button":
 				_toggle_palette()
+			"bumper", "x_button":         # dedicated STILL button (left index finger): stereo still + next composited frame, no toolbox
+				_still()
 	_write_ctl()
 
 

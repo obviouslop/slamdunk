@@ -99,6 +99,18 @@ class LiveStereo:
             disp = np.where(np.abs(dm - disp) < 1.0, disp, -1)
         return disp, rc, wb, s
 
+    def rectified_rgb_pair(self, rawL, rawR, half=False):
+        """-> (left, right) rectified RGB uint8 with the SAME white balance / tone as depth()'s colour output (for stereo viewing)."""
+        cL, cR = (rawL, rawR) if half else (self._rgb(rawL), self._rgb(rawR))
+        m = cL.reshape(-1, 3).mean(0); wb = m.mean() / np.maximum(m, 1e-6)
+        gL = cv2.cvtColor(cL, cv2.COLOR_BGR2GRAY); s = 255 / max(np.percentile(gL[::4, ::4], 99.5), 1)
+        out = []
+        for c, mp in ((cL, self.mapL), (cR, self.mapR)):
+            rc = cv2.remap(c, *mp, cv2.INTER_LINEAR); x = rc * (wb * s)
+            x += np.maximum(x.max(-1, keepdims=True) - 255, 0); x[rc.max(-1) > 0.97 * (1023 - 64)] = 255
+            out.append(np.ascontiguousarray(np.clip(x, 0, 255).astype(np.uint8)[:, :, ::-1]))
+        return out[0], out[1]
+
     def depth(self, rawL, rawR, far=None, half=False):
         """-> Z (rectified camL view, metres along the optical axis, 0 = invalid, valid up to `far`),
               RGB uint8 rectified colour, disp"""
