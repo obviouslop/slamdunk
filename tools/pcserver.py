@@ -50,6 +50,7 @@ ap.add_argument("--max-pub", type=int, default=300000)
 ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker threads (leave cores for XR)")
 ap.add_argument("--underfloor-cm", type=float, default=7.0, help="drop points more than this far below a FLAT floor (mirror images of windows in glossy floors); 0 = off")
 ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-res occlusion depth frames")
+ap.add_argument("--conf", action="store_true", help="weight TSDF observations by per-pixel confidence (texture / depth-edge); A/B showed no gain on floor thickness, see re/test_conf.py")
 ap.add_argument("--no-handmask", action="store_true", help="do not keep hands / controllers out of the fused cloud")
 ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
 ap.add_argument("--origin-mm", type=float, help="printed edge of the origin marker in mm (default fiducials.ORIGIN_MM)")
@@ -280,7 +281,7 @@ try:
             if hm.any(): Z = Z.copy(); Z[hm] = 0
         with lock:
             mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
-            ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"])
+            ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"], conf=ls.confidence(Z, rgb) if a.conf else None)
         n_frames += 1; tst.append(t2 - t1); tfu.append(time.monotonic() - t2); t_fr.append(time.monotonic())
         if zf.poll() or time.monotonic() - t_pub > a.publish_every:
             t_pub = time.monotonic()

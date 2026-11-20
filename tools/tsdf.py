@@ -26,7 +26,7 @@ def _load():
     L.tsdf_set.argtypes = [vp, ip, fp]
     L.tsdf_free.argtypes = [vp]; L.tsdf_reset.argtypes = [vp]; L.tsdf_nblocks.argtypes = [vp]
     L.tsdf_integrate.restype = ctypes.c_long
-    L.tsdf_integrate.argtypes = [vp, up, up, up, ip, ip, fp, fp, fp, dp, fp, fp, fp, fp, ip, ctypes.c_double]
+    L.tsdf_integrate.argtypes = [vp, up, up, up, ip, ip, fp, fp, fp, dp, fp, fp, fp, fp, ip, ctypes.c_double, up]
     L.tsdf_extract.argtypes = [vp, ip, fp]
     L.tsdf_get.argtypes = [vp, up, up, up, up, up]
     L.tsdf_gc.argtypes = [vp, ip, ip]
@@ -77,16 +77,17 @@ class TSDF:
     def nblocks(self):
         return self.L.tsdf_nblocks(self.h)
 
-    def integrate(self, ls, Z, rgb, world_from_rect, mask=None, t=0.0):
-        """t = acquisition time of the frame (s); stored per voxel for the closest observation. Z: HxW float32 depth (rectified camL view, 0 = invalid), rgb HxWx3 uint8, mask HxW uint8/bool or None."""
+    def integrate(self, ls, Z, rgb, world_from_rect, mask=None, t=0.0, conf=None):
+        """t = acquisition time of the frame (s); stored per voxel for the closest observation. Z: HxW float32 depth (rectified camL view, 0 = invalid), rgb HxWx3 uint8, mask HxW uint8/bool or None. conf: HxW float32 0..1 per-pixel confidence (see LiveStereo.confidence) or None."""
         H, W = Z.shape
         Z = np.ascontiguousarray(Z, np.float32); rgb = np.ascontiguousarray(rgb, np.uint8)
         T = np.ascontiguousarray(world_from_rect, np.float64)
         mk = None if mask is None else np.ascontiguousarray(mask, np.uint8)
+        cf = None if conf is None else np.ascontiguousarray(conf, np.float32)
         n = self.L.tsdf_integrate(self.h, Z.ctypes.data, rgb.ctypes.data, None if mk is None else mk.ctypes.data, W, H,
                                   float(ls.f), float(ls.P1[0, 2]), float(ls.P1[1, 2]),
                                   T.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), float(ls.f * ls.baseline),
-                                  self.sigma_disp, self.max_depth, self.carve_depth, self.alloc_stride, float(t))
+                                  self.sigma_disp, self.max_depth, self.carve_depth, self.alloc_stride, float(t), None if cf is None else cf.ctypes.data)
         self.frames += 1
         if self.gc_every and self.frames % self.gc_every == 0:
             self.gc()

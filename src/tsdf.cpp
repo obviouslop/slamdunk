@@ -107,10 +107,11 @@ void tsdf_reset(void* p) {
 int tsdf_nblocks(void* p) { return int(static_cast<Map*>(p)->keys.size()); }
 
 // Z: HxW metric depth along the rectified optical axis (0 = invalid). rgb: HxWx3 uint8 (may be null).
+// conf: HxW float 0..1 per-pixel measurement confidence (texture / local depth consistency), scales the observation weight; may be null.
 // mask: HxW uint8, 0 = ignore pixel for surface updates/allocation (paint mode), may be null.
 // world_from_rect: row-major 4x4. tstamp: acquisition time of the frame (s). Returns number of voxel updates.
 long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* mask, int W, int H, float f, float cx, float cy,
-                    const double* T, float fB, float sigma_disp, float max_depth, float carve_depth, int alloc_stride, double tstamp) {
+                    const double* T, float fB, float sigma_disp, float max_depth, float carve_depth, int alloc_stride, double tstamp, const float* conf) {
     Map* m = static_cast<Map*>(p);
     const float v = m->vox;
     m->frame++;
@@ -195,6 +196,7 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
                     float bd = band(zm);
                     Voxel& vx = vb[(lz * B + ly) * B + lx];
                     float obs, wo;
+                    const float cf = conf ? conf[pi] : 1.f;
                     bool surf = false;
                     if (sd > bd) {                          // free space
                         float zc = Zmin[pi];
@@ -202,7 +204,7 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
                         obs = 1.f; wo = m->carve_w;
                     } else if (sd >= -bd) {                 // inside the band
                         if (zm > max_depth || (mask && !mask[pi])) continue;
-                        obs = sd / bd; wo = std::min(1.f, 1.f / (zm * zm)); surf = true;
+                        obs = sd / bd; wo = std::min(1.f, 1.f / (zm * zm)) * cf; surf = true;
                         // closer observations are more accurate: once a voxel was seen from dq, further-away views count less
                         float dm = vx.dq ? vx.dq * DQ : 1e9f, zq = std::max(zm, 0.3f);
                         if (zq > dm) wo *= (dm / zq) * (dm / zq);
@@ -210,7 +212,7 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
                         // just behind the measured surface: solid. Only touches voxels that currently claim to be on
                         // the free side, so a real surface further back (seen by other views) is not eroded.
                         if (vx.wq == 0 || vx.tsdf() <= 0.f) continue;
-                        obs = -1.f; wo = m->back_w * std::min(1.f, 1.f / (zm * zm));
+                        obs = -1.f; wo = m->back_w * std::min(1.f, 1.f / (zm * zm)) * cf;
                     } else {
                         continue;                           // occluded
                     }

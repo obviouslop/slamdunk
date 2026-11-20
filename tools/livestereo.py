@@ -126,6 +126,24 @@ class LiveStereo:
         rgb = np.clip(x, 0, 255).astype(np.uint8)[:, :, ::-1]
         return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
 
+    @staticmethod
+    def confidence(Z, rgb, g0=8.0, gmin=1.5, jump=0.04):
+        """Per-pixel measurement confidence 0..1 (LSD-SLAM style depth-hypothesis variance, cheap version).
+        Depth variance of a block-matching pixel is large where the image has little texture (the disparity is then
+        interpolated) and where the local depth jumps (flying pixels at occlusion edges / foreground fattening).
+          texture : mean |gradient| of the left image over 7x7 (grey levels) -> c_t = clip(g / g0, 0.15, 1), 0 below gmin
+          edge    : (max - min of Z over 3x3) / Z -> c_e = clip(1 - rel / jump, 0.1, 1)
+        -> float32 HxW (0 where Z invalid or the texture is below gmin: such pixels should not be integrated at all)."""
+        g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3) * 0.125; gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3) * 0.125
+        tex = cv2.blur(np.hypot(gx, gy), (7, 7))
+        ct = np.clip(tex / g0, 0.15, 1.0); ct[tex < gmin] = 0
+        k = np.ones((3, 3), np.uint8)
+        zmax = cv2.dilate(Z, k); zmin = cv2.erode(np.where(Z > 0, Z, 1e3).astype(np.float32), k)
+        rel = (zmax - np.minimum(zmin, zmax)) / np.maximum(Z, 1e-3)
+        ce = np.clip(1.0 - rel / jump, 0.1, 1.0)
+        return np.where(Z > 0, ct * ce, 0).astype(np.float32)
+
     def world_from_rect(self, hmd_pose_3x4):
         H = np.eye(4); H[:3, :] = np.asarray(hmd_pose_3x4); W = H @ self.head_from_camL
         Rr = np.eye(4); Rr[:3, :3] = self.R1.T             # camL <- rect
