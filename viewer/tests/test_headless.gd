@@ -113,7 +113,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 31, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 32, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()
@@ -188,6 +188,10 @@ func _late_b() -> void:
 	check(tl.nodes.is_empty(), "tag labels removed when the server drops them")
 	inst.call("_on_palette", "tags")
 	check(not tl.visible and not ip.buttons["tags"]["active"], "TAGS toggle hides the labels")
+	check(ip.buttons["far"]["active"] and bool(inst.get("far_on")), "FAR is on by default")
+	inst.call("_on_palette", "far")
+	check(not bool(inst.get("far_on")) and not ip.buttons["far"]["active"], "FAR toggle switches the far-range depth off")
+	inst.call("_on_palette", "far")
 	inst.call("_on_palette", "tags")
 	# SELECT: per-tool buttons, brush selection -> exclusion zone, undo; zone file for the server
 	inst.call("_on_palette", "zone")

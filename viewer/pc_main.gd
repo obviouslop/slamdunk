@@ -103,6 +103,7 @@ var pal_holder: Node3D
 var passthrough: DepthPassthrough
 var tag_layer: TagLayer                   # fiducial + QR labels (tools/tags.py)
 var tags_on := true
+var far_on := true                          # wide-baseline far-range depth (tools/farstereo.py)
 var tag_accum := 0.0
 var occlude := true                       # scene 90 % translucent where the real world (stereo depth) is closer
 var occ_shown := false
@@ -302,6 +303,7 @@ func _build_scene() -> void:
 	palette.add_button("sel_keep", "KEEP ONLY", 1, 6)
 	palette.add_button("sel_label", "LABEL", 2, 6)
 	palette.add_button("tags", "TAGS", 0, 7)
+	palette.add_button("far", "FAR", 1, 7)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -584,6 +586,11 @@ func _on_palette(id: String) -> void:
 			_say("objects cleared")
 		"pass":
 			_toggle_passthrough()
+		"far":
+			far_on = not far_on
+			_say("far range ON: wide-baseline depth from stored keyframes" if far_on else "far range off")
+			_write_ctl()
+			_sync_palette()
 		"tags":
 			tags_on = not tags_on
 			tag_layer.visible = tags_on
@@ -632,6 +639,7 @@ func _sync_palette() -> void:
 	palette.set_active("pass", passthrough.visible)
 	palette.set_active("occlude", occlude)
 	palette.set_active("tags", tags_on)
+	palette.set_active("far", far_on)
 	palette.set_active("zone_show", zones_shown)
 	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
 	for id in ["sel_delete", "sel_keep", "sel_label"]:
@@ -955,7 +963,7 @@ func _write_ctl() -> void:
 			hands.append(m12)
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
 		"aim": aim, "hands": hands, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
-		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on}
+		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -1177,6 +1185,8 @@ func _update_status() -> void:
 	status.text += "   %02d:%02d:%02d.%d  f%d" % [dt["hour"], dt["minute"], dt["second"], int(fmod(ut, 1.0) * 10), int(srv.get("frame", -1))]
 	if String(srv.get("origin", "")) != "":
 		status.text += "   " + String(srv["origin"])
+	if far_on and String(srv.get("far", "")) != "":
+		status.text += "   " + String(srv["far"])
 	if not gnss.is_empty():
 		status.text += "   GNSS %s %.2f m%s" % [gnss.get("fix", "?"), float(gnss.get("hacc", -1)),
 			"  geo %.2f" % float(georef.get("rms", 0)) if georef.get("ok", false) else ""]

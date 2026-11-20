@@ -32,6 +32,7 @@ import handmask
 import floor as floormod
 import fiducials
 from origin import OriginTracker
+from farstereo import FarStereo
 from tags import TagWatcher
 
 ap = argparse.ArgumentParser()
@@ -51,6 +52,11 @@ ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker thr
 ap.add_argument("--underfloor-cm", type=float, default=7.0, help="drop points more than this far below a FLAT floor (mirror images of windows in glossy floors); 0 = off")
 ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-res occlusion depth frames")
 ap.add_argument("--conf", action="store_true", help="weight TSDF observations by per-pixel confidence (texture / depth-edge); A/B showed no gain on floor thickness, see re/test_conf.py")
+ap.add_argument("--no-far", action="store_true", help="no wide-baseline far-range depth (tools/farstereo.py)")
+ap.add_argument("--far-mb", type=float, default=100.0, help="size of the on-disk keyframe ring buffer for the far-range depth (MB)")
+ap.add_argument("--far-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "scratch", "far"))
+ap.add_argument("--far-blur", type=float, default=1.0, help="keyframes only below this estimated motion blur (px)")
+ap.add_argument("--far-zmin", type=float, default=2.5, help="far points start at this range (m)")
 ap.add_argument("--no-handmask", action="store_true", help="do not keep hands / controllers out of the fused cloud")
 ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
 ap.add_argument("--apply-origin-corr", action="store_true", help="correct the SteamVR pose with the origin marker (fades out over 3 s after it was last seen)")
@@ -105,6 +111,11 @@ def extract_kept():
         uf, fy, fs = floormod.underfloor_mask(P, tol=a.underfloor_cm / 100)
         if uf.any():
             k = ~uf; P, C, w, t, d = P[k], C[k], w[k], t[k], d[k]
+    if far is not None:                         # far-range points from wide-baseline keyframe pairs
+        Pf, Cf, rf, sf, tf = far.points()
+        if len(Pf):
+            P = np.vstack([P, Pf]); C = np.vstack([C, Cf]); w = np.concatenate([w, np.ones(len(Pf), np.float32)])
+            t = np.concatenate([t, tf]); d = np.concatenate([d, rf])
     if not zf.zones:
         return P, C, np.zeros(len(P), np.uint8), t, d
     keep, lab = zonemod.evaluate(P, zf.zones)
@@ -179,6 +190,8 @@ def occ_loop():
 
 threading.Thread(target=occ_loop, daemon=True).start()
 origin = None if a.no_origin else OriginTracker(ls, path=f"{SHM}/pcorigin.json")
+far = None if a.no_far else FarStereo(ls, a.far_dir, max_bytes=a.far_mb * 1e6, z_min=a.far_zmin, blur_px=a.far_blur)
+if far: far.start()
 tagwatch = TagWatcher(ls, origin, path=f"{SHM}/pctags.json")      # fiducials + QR codes -> pctags.json (viewer labels them), also feeds the origin
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
@@ -201,7 +214,7 @@ def take_still():
 def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
                                  scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame,
-                                 origin=origin.hud() if origin else ""))
+                                 origin=origin.hud() if origin else "", far=far.hud() if far else ""))
 
 
 last_fps = 0.0
@@ -215,6 +228,7 @@ def handle_cmd(ctl):
         c = ctl.get("cmd")
         if c == "reset":
             with lock: ts.reset()
+            if far is not None: far.clear()
             print("map reset", flush=True)
         elif c == "save":
             name = os.path.basename(ctl.get("name") or time.strftime("scan_%Y%m%d_%H%M%S"))
@@ -283,6 +297,9 @@ try:
             hp = [(h[3], h[7], h[11]) for h in ctl["hands"] if len(h) == 12]
             hm = handmask.hand_mask(Z, np.linalg.inv(Tt), ls.f, ls.P1[0, 2], ls.P1[1, 2], hp)
             if hm.any(): Z = Z.copy(); Z[hm] = 0
+        if far is not None:
+            far.enabled = bool(ctl.get("far", True)) if ctl else True
+            far.offer(rgb, Z, T, mL["ts"], mL.get("exp_lines", 3000))
         with lock:
             mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
             ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"], conf=ls.confidence(Z, rgb) if a.conf else None)

@@ -709,3 +709,28 @@ PyTorch optimiser (offline Poisson in postprocess.py already covers meshing), ls
   ignored when the measured deviation is > 80 mm / 4 deg. Offline unit-checked only; not yet validated in the headset.
 * Idea for the keyframe selector (user): estimate motion blur from the pose velocities, blur_px ~ omega * t_exp * f (exp_lines in
   the frame metadata), no image analysis needed.
+
+## Wide-baseline far-range depth (tools/farstereo.py, 2026-11-20)
+The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3 m. Pairs of frames taken at different moments
+(0.3-5 m apart) form much better pairs of the static far scene (sigma_z 0.27 m at 10 m with B = 1 m, 1.0 m at 30 m with B = 2 m).
+* **Keyframes** (`FarStereo.offer`, called per fused frame): rectified left RGB stored as JPEG + pose json in an on-disk ring buffer
+  (`captures/scratch/far`, `--far-mb 100`, oldest deleted first; emptied at start). Selected when (a) estimated motion blur from the
+  pose velocities f*t_exp*(omega + v/z_med) <= `--far-blur` (1 px; no image analysis), (b) >= 20 % of the image has no near stereo
+  depth ("only if necessary"), (c) the view adds baseline/angle (0.25 m / 12 deg novelty), >= 0.4 s apart.
+* **Pairs** (worker thread, every 2 s, `FarStereo.step`): partner baseline 0.3-5 m, view angle < 35 deg, baseline mostly horizontal
+  and not along the viewing axis (SGBM searches along x). Relative pose: SIFT matches -> essential matrix (rotation far better than
+  SteamVR's ~1 deg; must agree with the tracker within 6 deg / 20 deg direction); baseline LENGTH from the tracked positions.
+  stereoRectify + SGBM at half resolution.
+* **Accuracy estimate** per point: sigma_z = z*sqrt((z*sigma_d/(f*B))^2 + (sigma_B/B)^2), sigma_d = 1 px, sigma_B = 1.5 cm. HUD shows
+  the median. **Ill-fitting points are dropped**: pair verification against the sparse matches (rows aligned < 0.8 px, SGBM reproduces
+  the match disparities >= 60 %), SGBM left-right check + uniqueness, flying-pixel median test, sigma/z <= 12 %, range 2.5-80 m, and
+  a point only reaches the cloud when a second pair with a different reference keyframe confirms it (or sigma/z <= 2 %): moving
+  objects do not repeat consistently.
+* **Cloud**: far points are appended in `extract_kept` (zones apply, saved in PLYs; `dist` column = range). Toolbox FAR button (row 7,
+  default ON, `ctl.far`); `--no-far` disables. A reset clears the far store.
+* **Validation status (honest)**: all recordings (live17-20) are 1 fps, so the blur gate cannot be tested on them (use `--far-blur 1e9`)
+  and good lateral pairs are rare: live17 gave only 4 accepted pairs of 194 candidates (live18/19: 0). Of the accepted ones, B = 0.81 m
+  agrees with the near stereo to -12 cm (spread 12 cm, ~2x the claimed sigma, so the model is somewhat optimistic) and some had
+  a degenerate rectification (fixed afterwards by rejecting fp/B <= 0, not re-checked). Needs a live 10 fps session with sideways
+  motion; use `re/test_far.py` on a new recording (compares each pair with the reference frame's own stereo depth in 1.2-3.8 m).
+  Forward walking gives epipoles inside the image: not supported yet (would need plane-sweep matching instead of rectification).
