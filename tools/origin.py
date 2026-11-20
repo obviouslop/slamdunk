@@ -108,6 +108,17 @@ class OriginTracker:
         except OSError:
             pass
 
+    def correction_now(self, max_age=3.0, gate_mm=80.0, gate_deg=4.0):
+        """4x4 C to apply as  T_fused = C @ T_tracked  (left-multiply any stage_from_cam pose), or None.
+        The SteamVR error is position dependent, so the correction is only trusted near the time/place the marker was seen:
+        it fades linearly to identity over max_age seconds since the last detection, and is ignored when the last measured
+        deviation is implausibly large (bad detection)."""
+        if self.state != "locked" or self.t_seen is None or self.dev is None: return None
+        age = time.monotonic() - self.t_seen
+        if age >= max_age or self.dev[0] > gate_mm or self.dev[1] > gate_deg: return None
+        a = 1.0 - age / max_age
+        return self.corr if a >= 0.999 else F.mean_pose([np.eye(4), self.corr], [1 - a, a])
+
     def hud(self):
         if self.state == "locked" and self.dev:
             return f"origin: locked, SteamVR dev {self.dev[0]:.0f} mm / {self.dev[1]:.1f}°"

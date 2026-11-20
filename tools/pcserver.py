@@ -53,6 +53,7 @@ ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-
 ap.add_argument("--conf", action="store_true", help="weight TSDF observations by per-pixel confidence (texture / depth-edge); A/B showed no gain on floor thickness, see re/test_conf.py")
 ap.add_argument("--no-handmask", action="store_true", help="do not keep hands / controllers out of the fused cloud")
 ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
+ap.add_argument("--apply-origin-corr", action="store_true", help="correct the SteamVR pose with the origin marker (fades out over 3 s after it was last seen)")
 ap.add_argument("--origin-mm", type=float, help="printed edge of the origin marker in mm (default fiducials.ORIGIN_MM)")
 ap.add_argument("--origin-frame", action="store_true", help="save PLYs in the origin-marker frame (x right, y up, z out of the paper) "
                 "when the marker is locked; default: STAGE coordinates, with the marker pose in the <name>.ply.json sidecar")
@@ -268,6 +269,9 @@ try:
         Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
         Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
         T = Tt
+        if a.apply_origin_corr and origin:
+            Cc = origin.correction_now()
+            if Cc is not None: T = Cc @ Tt
         tagwatch.submit(cL, mL["pose"], Z)
         if want_view:                                   # depth-correct passthrough (STAGE frame, raw tracking pose)
             n_pt += 1

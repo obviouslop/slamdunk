@@ -691,3 +691,21 @@ TODO: depth-correct own passthrough (user approved).
 - Tested: synthetic fidsyn frames (tag poses within the injected 4 mm tracker error), the real QR image with a fake depth plane
   (decoded "Hello claude"), viewer fixtures, server replay without errors. NOT yet seen in the headset; QR depth placement needs a
   real scene with valid stereo depth on the code (a phone screen / glossy print may have none).
+
+## Accuracy experiments from LSD-SLAM ideas (2026-11-20)
+Reviewed ~/code/{lsd_slam,point2mesh,open_semantic_slam} (read-only): OpenGS-SLAM needs CUDA 3DGS, point2mesh is a slow per-object
+PyTorch optimiser (offline Poisson in postprocess.py already covers meshing), lsd_slam contributed ideas only.
+* **Per-pixel confidence weighting** (`LiveStereo.confidence`, `TSDF.integrate(conf=)`, `pcserver --conf`, off by default): texture
+  and local depth-jump (flying pixel) weighting of the TSDF observation weight. A/B (`re/test_conf.py`, live20, 43 frames): floor
+  sigma 19.3 mm (base) vs 19.9-26.6 mm, point count within 2-6 %, isolated points unchanged -> no gain; floor thickness is
+  dominated by SteamVR pose error, not per-pixel noise.
+* **TSDF pose refiner** (`tools/poserefine.py`, `TSDF.sample` = trilinear value+gradient, `re/test_refine.py`): point-to-surface
+  Gauss-Newton of the tracked pose against the map, prior + caps. Not wired into pcserver because it made things WORSE on live17
+  vs the fiducial ground truth (cal#2 median error 21.4 -> 27.9 mm, slow drift 32 -> 43 mm; cal#3 9.7 -> 11.4 mm). The map is built
+  from the biased poses, so aligning to it cannot remove the bias (only makes frames mutually consistent). Needs an absolute
+  reference (fiducials) or loop closure instead.
+* **Live anchor correction** (`pcserver --apply-origin-corr`, `OriginTracker.correction_now`): T_fused = C @ T_tracked with C from
+  the origin marker, fading linearly to identity over 3 s after the marker was last seen (the error is position dependent) and
+  ignored when the measured deviation is > 80 mm / 4 deg. Offline unit-checked only; not yet validated in the headset.
+* Idea for the keyframe selector (user): estimate motion blur from the pose velocities, blur_px ~ omega * t_exp * f (exp_lines in
+  the frame metadata), no image analysis needed.

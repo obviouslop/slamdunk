@@ -26,6 +26,7 @@
 #include <omp.h>
 #endif
 
+#include <limits>
 namespace {
 constexpr int B = 8;               // voxels per block edge
 constexpr int BV = B * B * B;
@@ -104,6 +105,34 @@ void tsdf_reset(void* p) {
     Map* m = static_cast<Map*>(p);
     m->index.clear(); m->keys.clear(); m->born.clear(); m->vox_data.clear(); m->vox_data.shrink_to_fit(); m->frame = 0; m->t0 = -1.0;
 }
+// Sample the TSDF at world points: trilinear value and gradient. out = N x 4 floats (tsdf, gx, gy, gz); tsdf = NaN where any of
+// the 8 neighbours is unobserved, or lies outside the truncation band (|tsdf| > 0.95). Used for pose refinement
+// (distance to the zero crossing ~ tsdf / |grad|).
+void tsdf_sample(void* p, const float* pts, int n, float* out) {
+    Map* m = static_cast<Map*>(p);
+    const float v = m->vox, nan = std::numeric_limits<float>::quiet_NaN();
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; i++) {
+        float gx = pts[i * 3] / v - 0.5f, gy = pts[i * 3 + 1] / v - 0.5f, gz = pts[i * 3 + 2] / v - 0.5f;
+        int x0 = ifloor(gx), y0 = ifloor(gy), z0 = ifloor(gz);
+        float fx = gx - x0, fy = gy - y0, fz = gz - z0, c[2][2][2];
+        bool ok = true;
+        for (int dz = 0; dz < 2 && ok; dz++) for (int dy = 0; dy < 2 && ok; dy++) for (int dx = 0; dx < 2; dx++) {
+            const Voxel* q = m->find_voxel(x0 + dx, y0 + dy, z0 + dz);
+            if (!q || q->wq == 0 || std::fabs(q->tsdf()) > 0.95f) { ok = false; break; }
+            c[dz][dy][dx] = q->tsdf();
+        }
+        if (!ok) { out[i * 4] = nan; continue; }
+        float val = 0, gxs = 0, gys = 0, gzs = 0;
+        for (int dz = 0; dz < 2; dz++) for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
+            float wx = dx ? fx : 1 - fx, wy = dy ? fy : 1 - fy, wz = dz ? fz : 1 - fz, cv = c[dz][dy][dx];
+            val += wx * wy * wz * cv;
+            gxs += (dx ? 1.f : -1.f) * wy * wz * cv; gys += (dy ? 1.f : -1.f) * wx * wz * cv; gzs += (dz ? 1.f : -1.f) * wx * wy * cv;
+        }
+        out[i * 4] = val; out[i * 4 + 1] = gxs / v; out[i * 4 + 2] = gys / v; out[i * 4 + 3] = gzs / v;
+    }
+}
+
 int tsdf_nblocks(void* p) { return int(static_cast<Map*>(p)->keys.size()); }
 
 // Z: HxW metric depth along the rectified optical axis (0 = invalid). rgb: HxWx3 uint8 (may be null).

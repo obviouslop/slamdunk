@@ -27,6 +27,7 @@ def _load():
     L.tsdf_free.argtypes = [vp]; L.tsdf_reset.argtypes = [vp]; L.tsdf_nblocks.argtypes = [vp]
     L.tsdf_integrate.restype = ctypes.c_long
     L.tsdf_integrate.argtypes = [vp, up, up, up, ip, ip, fp, fp, fp, dp, fp, fp, fp, fp, ip, ctypes.c_double, up]
+    L.tsdf_sample.argtypes = [vp, up, ip, up]
     L.tsdf_extract.argtypes = [vp, ip, fp]
     L.tsdf_get.argtypes = [vp, up, up, up, up, up]
     L.tsdf_gc.argtypes = [vp, ip, ip]
@@ -92,6 +93,11 @@ class TSDF:
         if self.gc_every and self.frames % self.gc_every == 0:
             self.gc()
         return n
+
+    def sample(self, P):
+        """P (N,3) world points -> (N,4) float32: tsdf, gradient (1/m); NaN tsdf where the TSDF is unobserved / outside the band."""
+        P = np.ascontiguousarray(P, np.float32); out = np.empty((len(P), 4), np.float32)
+        self.L.tsdf_sample(self.h, P.ctypes.data, len(P), out.ctypes.data); return out
 
     def gc(self, min_age=30, min_nsurf=2):
         return self.L.tsdf_gc(self.h, min_age, min_nsurf)
