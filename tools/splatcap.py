@@ -43,10 +43,16 @@ class SplatCapture:
                                         "--masks", "--depth", *extra], stdout=log, stderr=subprocess.STDOUT)
         self.export_out = out; self.export_msg = ""; print(f"splat export -> {out}", flush=True); return True
 
+    def progress(self):
+        try: return float(json.load(open(self.export_out.rstrip("/") + ".progress"))["frac"])
+        except Exception: return None
+
     def export_state(self):
         if self.export is None: return self.export_msg
         rc = self.export.poll()
-        if rc is None: return "export: running ..."
+        if rc is None:
+            f = self.progress()
+            return "export: starting ..." if f is None else f"export [{'#' * int(round(f * 10))}{'-' * (10 - int(round(f * 10)))}] {int(f * 100)}%"
         return f"export: done -> {os.path.basename(self.export_out)}" if rc == 0 else "export: FAILED (see *_export.log)"
 
     def hud(self):

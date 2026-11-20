@@ -36,6 +36,15 @@ ap.add_argument("--cams", default="left,right"); ap.add_argument("--max-points",
 a = ap.parse_args()
 
 ls = LiveStereo(scale=0.5)
+
+
+def progress(frac, stage):
+    """progress file next to the output dir (read by pcserver for the viewer's progress bar)"""
+    try:
+        with open(a.out.rstrip("/") + ".progress", "w") as f: json.dump(dict(frac=round(float(frac), 3), stage=stage), f)
+    except OSError: pass
+
+
 UP = {}          # per camera: (cv2 rotate code or None, R_old_from_new). The sensors are mounted +-90 deg: rotate the images upright.
 KB = {"left": (ls.KL, ls.DL), "right": (ls.KR, ls.DR)}
 
@@ -85,7 +94,8 @@ def load(s, i):
 # 1) per image: sharpness (exposure-normalised Laplacian variance) and feature richness (FAST corners) on a quarter-res grey image
 fast = cv2.FastFeatureDetector_create(threshold=12)
 score, feat = {}, {}
-for s, i, m in cand:
+for ci, (s, i, m) in enumerate(cand):
+    if ci % 10 == 0: progress(0.2 * ci / max(len(cand), 1), "scoring")
     raw = load(s, i).astype(np.float32)
     g = np.clip(raw[::4, ::4] - 64, 0, None) / exposure_factor(m)
     g = np.sqrt(np.clip(g / max(np.percentile(g, 99), 1e-9), 0, 1)).astype(np.float32)
@@ -265,9 +275,11 @@ with open(os.path.join(sp, "images.txt"), "w") as fi:
         Tc = np.linalg.inv(T)                                   # world-to-camera
         q = qvec(Tc[:3, :3]); t = Tc[:3, 3]
         fi.write(f"{n} {q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {q[3]:.9f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} {cam_id[s]} {name}\n\n")
+        progress(0.2 + 0.75 * n / len(keep), "images")
         if n % 25 == 0: print(f"  {n}/{len(keep)}", flush=True)
 
 
+progress(0.95, "points")
 npts = 0
 with open(os.path.join(sp, "points3D.txt"), "w") as fp:
     fp.write("# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n")
@@ -289,4 +301,5 @@ with open(os.path.join(sp, "points3D.txt"), "w") as fp:
         npts = len(P)
 json.dump(dict(rec=a.rec, images=len(keep), fov=a.fov, size=N, points=npts, wb=wb.tolist(), scale=sc, frame="STAGE (SteamVR), y up, metres"),
           open(os.path.join(a.out, "export.json"), "w"), indent=1)
+progress(1.0, "done")
 print(f"wrote {a.out}: {len(keep)} images, {npts} points. Train e.g.:  brush {a.out}")

@@ -247,7 +247,8 @@ def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
                                  scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame,
                                  origin=origin.hud() if origin else "", far=far.hud() if far else "",
-                                 splat=splatcap.hud() if splatcap else "", splat_on=bool(splatcap and splatcap.enabled), splat_dir=(splatcap.dir or "") if splatcap else ""))
+                                 splat=splatcap.hud() if splatcap else "", splat_on=bool(splatcap and splatcap.enabled), splat_dir=(splatcap.dir or "") if splatcap else "", splat_n=splatcap.n if splatcap else 0,
+                                 splat_prog=(-1.0 if not splatcap or splatcap.export is None else (splatcap.progress() if splatcap.export.poll() is None else 1.0)) if splatcap else -1.0))
 
 
 last_fps = 0.0

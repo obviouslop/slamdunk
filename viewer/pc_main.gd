@@ -105,6 +105,7 @@ var tag_layer: TagLayer                   # fiducial + QR labels (tools/tags.py)
 var tags_on := true
 var plane_layer: PlaneLayer             # coarse fitted planes, 10 % translucent (tools/planes.py)
 var planes_on := false
+var splat_n_seen := 0
 var splat_on := false                   # capture-for-splatting (tools/splatcap.py), independent of the point-cloud scanning
 var plane_accum := 0.0
 var far_on := true                          # wide-baseline far-range depth (tools/farstereo.py)
@@ -1092,6 +1093,13 @@ func _process(delta: float) -> void:
 	if slow_accum >= 0.5:
 		slow_accum = 0.0
 		srv = _read_json(STATUS_PATH)
+		var sn := int(srv.get("splat_n", 0))
+		if splat_on and sn > splat_n_seen:
+			_buzz("right_hand", 0.25, 0.03)                      # tick for every stored view
+		splat_n_seen = sn
+		palette.set_text("splat", "◉ SPLAT %d" % sn if sn > 0 else "◉ SPLAT")
+		var sp := float(srv.get("splat_prog", -1.0))
+		palette.set_text("splat_export", "EXPORT %d%%" % int(sp * 100) if sp >= 0.0 and sp < 1.0 else "EXPORT SPLAT")
 		gnss = _read_json(GNSS_PATH)
 		georef = _read_json(GEOREF_PATH)
 		var n := int(srv.get("stills", 0))
