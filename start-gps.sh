@@ -7,7 +7,8 @@ GLASGOW=${GLASGOW:-$HOME/.local/bin/glasgow}
 LINK=/dev/shm/gps-nmea; LOG=captures/logs/glasgow.log; mkdir -p captures/logs
 before=$(ls /dev/pts 2>/dev/null | sort)
 "$GLASGOW" -v run uart -V 3.3 --rx A1 --tx A2 -b 38400 pty > "$LOG" 2>&1 & GPID=$!
-trap 'kill $GPID 2>/dev/null; rm -f "$LINK"' EXIT INT TERM
+DPID=""
+trap '[ -n "$DPID" ] && { kill $DPID 2>/dev/null || sudo -n kill $DPID 2>/dev/null; }; kill $GPID 2>/dev/null; rm -f "$LINK"' EXIT INT TERM
 pty=""
 for _ in $(seq 1 150); do                                  # up to 30 s (FPGA bitstream load + applet start)
   kill -0 $GPID 2>/dev/null || { echo "glasgow exited:"; tail -20 "$LOG"; exit 1; }
@@ -19,4 +20,11 @@ for _ in $(seq 1 150); do                                  # up to 30 s (FPGA bi
 done
 [ -n "$pty" ] || { echo "no PTY found, see $LOG"; exit 1; }
 ln -sf "$pty" "$LINK"; echo "GNSS PTY: $pty  (symlink $LINK)"
-if [ "${1:-}" = --gpsd ]; then sudo gpsd -N -n -b -D 3 "$pty"; else wait $GPID; fi
+if [ "${1:-}" = --gpsd ]; then
+  # gpsd needs no root for a PTY we own; fall back to passwordless sudo (sudoers: steamos ALL=(root) NOPASSWD: /usr/bin/gpsd).
+  # It runs in the background so the trap above stops it together with glasgow.
+  gpsd -N -n -b -D 3 "$pty" > captures/logs/gpsd.log 2>&1 & DPID=$!; sleep 1
+  kill -0 $DPID 2>/dev/null || { sudo -n gpsd -N -n -b -D 3 "$pty" > captures/logs/gpsd.log 2>&1 & DPID=$!; sleep 1; }
+  kill -0 $DPID 2>/dev/null || { echo "gpsd failed, see captures/logs/gpsd.log"; exit 1; }
+fi
+wait $GPID

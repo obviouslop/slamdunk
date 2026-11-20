@@ -12,4 +12,4 @@ if [ -x "${GLASGOW:-$HOME/.local/bin/glasgow}" ] && ! pgrep -f "[g]lasgow.* run 
   else echo "no GNSS (see captures/logs/gps.log); continuing without"; fi
 fi
 tools/pcsession.sh "${ARGS[@]}" "${GNSS[@]}"
-pkill -f "[s]tart-gps.sh"; pkill -f "[g]lasgow.* run uart"
+pkill -f "[s]tart-gps.sh"; pkill -f "[g]lasgow.* run uart"; pkill -x gpsd
