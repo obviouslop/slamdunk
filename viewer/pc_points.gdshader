@@ -30,8 +30,16 @@ void vertex() {
 			vec2 g = (occ_intr.x * pr.xy / pr.z + occ_intr.yz) / occ_block;
 			ivec2 sz = textureSize(occ_depth, 0);
 			if (g.x >= 0.0 && g.y >= 0.0 && g.x < float(sz.x) && g.y < float(sz.y)) {
-				float z = texelFetch(occ_depth, ivec2(g), 0).r;
-				if (z > 0.0 && z < pr.z - occ_margin) vis *= occ_alpha;
+				// eroded test: the cell and its 4 neighbours must ALL be nearer (cells are block means, so around a depth
+				// edge they mix hand and background; without this the hand casts a "shadow" about one cell wide)
+				ivec2 gi = ivec2(g);
+				bool occl = true;
+				for (int k = 0; k < 5; k++) {
+					ivec2 o = k == 0 ? ivec2(0, 0) : k == 1 ? ivec2(1, 0) : k == 2 ? ivec2(-1, 0) : k == 3 ? ivec2(0, 1) : ivec2(0, -1);
+					float z = texelFetch(occ_depth, clamp(gi + o, ivec2(0), sz - 1), 0).r;
+					if (!(z > 0.0 && z < pr.z - occ_margin)) { occl = false; break; }
+				}
+				if (occl) vis *= occ_alpha;
 			}
 		}
 	}

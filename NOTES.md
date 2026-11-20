@@ -647,3 +647,19 @@ TODO: depth-correct own passthrough (user approved).
   frames, so hands still occlude). Checked visually on live16 (re/test_handmask.py -> captures/scratch/handmask): the
   region covers controller + hand. Limitation: controller poses come from the viewer at 10-30 Hz, so fast hand motion
   shifts the seed by a few cm (the 15 cm seed slack and the flood fill absorb this).
+
+## 2026-11-20 live18: occlusion lag / shadow, floor pocket
+- User: occlusion works, lag obvious, mask looks like a hand "shadow"; a pocket of points in the floor.
+- Floor pocket (re/floor_pocket.py captures/live18): 1.8k fused points up to 1.1 m BELOW the floor (floor y ~ -0.03 .. -0.05)
+  at x +0.3..+0.9, z -4.4..-2.7, seen from ~1.9 m, projecting onto a glossy wood-floor patch next to a bright reflection. Mirrored
+  about the floor plane they land on real geometry for 44 % of the points (8 % for a shifted control) -> mirror image of a window /
+  bright wall in the glossy floor (a planar mirror image is fixed in space, so multi-view consistency cannot remove it).
+  Fix: tools/floor.py, pcserver --underfloor-cm 7 (default on): points > 7 cm below a FLAT floor are dropped at extraction. Guard:
+  the floor must be a sharp y-histogram peak (peak bin >= 2x the median 8-40 cm above it); slopes / rough ground / outdoors
+  do not trigger it. On live18 it removes the pocket (1848 of its points), nothing else of note (96 floor-noise points).
+- Occlusion shadow: the depth grid cells are block means, so around a hand edge they mix hand and background and the hand
+  "shadow" was ~1 cell (8 px) wide. Now: finer grid (block 3 px at scale 0.2) and an eroded test in the shader / CPU mirror
+  (the cell and its 4 neighbours must all be nearer).
+- Occlusion lag: the mask used to be published after the full-res stereo + from a ~4 fps loop (age 0.2-0.4 s). Now its own thread
+  in pcserver (occ_loop, --occ-hz 15): own frame reader, low-res stereo (scale 0.2: 49 ms vs 107 ms, 2.3 % median depth difference),
+  published independently of fusion. Not yet exercised live (written while the live19 session was running).

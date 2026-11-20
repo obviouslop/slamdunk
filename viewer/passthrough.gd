@@ -178,8 +178,12 @@ func occludes(p: Vector3, margin := 0.08) -> bool:
 	var gi := Vector2i(int(floor(g.x)), int(floor(g.y)))
 	if gi.x < 0 or gi.y < 0 or gi.x >= grid.x or gi.y >= grid.y:
 		return false
-	var z := depth_img.get_pixel(gi.x, gi.y).r
-	return z > 0.0 and z < pr.z - margin
+	for o in [Vector2i(0, 0), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:    # same eroded test as the shader
+		var q := Vector2i(clampi(gi.x + o.x, 0, grid.x - 1), clampi(gi.y + o.y, 0, grid.y - 1))
+		var z := depth_img.get_pixel(q.x, q.y).r
+		if not (z > 0.0 and z < pr.z - margin):
+			return false
+	return true
 
 
 func cell_point(i: int, j: int) -> Variant:

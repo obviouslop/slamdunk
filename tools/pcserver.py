@@ -29,6 +29,7 @@ import zones as zonemod
 import pcpub
 import stills
 import handmask
+import floor as floormod
 import fiducials
 from origin import OriginTracker
 
@@ -46,6 +47,8 @@ ap.add_argument("--publish-every", type=float, default=1.0)
 ap.add_argument("--tile", type=float, default=1.0, help="tile size (m) of the published cloud")
 ap.add_argument("--max-pub", type=int, default=300000)
 ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker threads (leave cores for XR)")
+ap.add_argument("--underfloor-cm", type=float, default=7.0, help="drop points more than this far below a FLAT floor (mirror images of windows in glossy floors); 0 = off")
+ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-res occlusion depth frames")
 ap.add_argument("--no-handmask", action="store_true", help="do not keep hands / controllers out of the fused cloud")
 ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
 ap.add_argument("--origin-mm", type=float, help="printed edge of the origin marker in mm (default fiducials.ORIGIN_MM)")
@@ -95,6 +98,10 @@ def extract_kept():
     """Fused surface points with the zones applied -> P, C, labels, acquisition time (s), view distance (m)"""
     with lock:
         P, C, w, t, d = ts.extract(min_frames=a.min_frames, attrs=True)
+    if a.underfloor_cm > 0 and len(P):
+        uf, fy, fs = floormod.underfloor_mask(P, tol=a.underfloor_cm / 100)
+        if uf.any():
+            k = ~uf; P, C, w, t, d = P[k], C[k], w[k], t[k], d[k]
     if not zf.zones:
         return P, C, np.zeros(len(P), np.uint8), t, d
     keep, lab = zonemod.evaluate(P, zf.zones)
@@ -136,6 +143,38 @@ while True:   # wait for the frame source (arcgrab or replay_shm.py)
     except (FileNotFoundError, RuntimeError, ValueError): print("waiting for /dev/shm/arcgrab ...", flush=True); time.sleep(1)
 ls = LiveStereo(scale=a.scale, max_depth=a.maxdepth, min_depth=a.min_depth)
 if a.origin_mm: fiducials.BOARDS["origin"]["tag_mm"] = a.origin_mm
+occ_state = {"on": False}
+
+
+def occ_loop():
+    """Occlusion mask producer: its own frame reader and a cheap low-res stereo pass at up to --occ-hz, independent of the (slow)
+    fusion loop, so the mask is fresh (speed over accuracy). Colour is not published (8x8 placeholder)."""
+    so = ArcShm(); lso = LiveStereo(scale=0.2, max_depth=a.maxdepth, min_depth=a.min_depth); last = -1; seq = 0
+    kw = dict(W=so.line_px, stride=so.line_bytes, skip=so.skip, black=float(so.black), threads=1)
+    while not stop:
+        if not occ_state["on"]:
+            time.sleep(0.05); continue
+        t0 = time.monotonic()
+        try:
+            mL, bL = so.latest_packed(0, after_frame=last, timeout=0.5)
+            mR, bR = so.latest_packed(1, after_frame=mL["frame"] - 2, timeout=0.5)
+        except TimeoutError:
+            continue
+        last = mL["frame"]
+        if not mL["pose_valid"] or abs(mL["ts"] - mR["ts"]) > a.pair_tol: continue
+        try:
+            H = (min(len(bL), len(bR)) // so.line_bytes) - so.skip
+            cL = bin_raw10(bL, H=min(H, so.line_px), **kw); cR = bin_raw10(bR, H=min(H, so.line_px), **kw)
+            Zo, rgbo, _ = lso.depth(cL, cR, far=a.carve_depth, half=True)
+            seq += 1
+            ptpub.publish(ptpub.pack(Zo, rgbo, lso.f, lso.P1[0, 2], lso.P1[1, 2], lso.world_from_rect(mL["pose"]), mL["ts"], mL["frame"],
+                                     (int(time.time() * 1000) + seq) & 0xFFFFFFF, colour_size=8, block=3))
+        except Exception as e:
+            print("occlusion thread:", e, flush=True); time.sleep(0.5)
+        time.sleep(max(0.0, 1.0 / a.occ_hz - (time.monotonic() - t0)))
+
+
+threading.Thread(target=occ_loop, daemon=True).start()
 origin = None if a.no_origin else OriginTracker(ls, path=f"{SHM}/pcorigin.json")
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
@@ -198,9 +237,9 @@ try:
             handle_cmd(ctl)
         painting = bool(ctl and ctl.get("painting") and len(ctl.get("aim") or []) == 12)
         want_view = a.passthrough or bool(ctl and ctl.get("passthrough"))          # viewer shows the camera image (needs colour)
-        want_pt = want_view or bool(ctl and ctl.get("occlude"))                    # depth grid for the occlusion mask / depth view
+        occ_state["on"] = bool(ctl and ctl.get("occlude")) and not want_view     # occlusion-only: its own fast low-res thread
         fuse = not (scan == "off" or (scan == "paint" and not painting))
-        if not fuse and not want_pt:
+        if not fuse and not want_view:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if zf.poll():                     # zones edited while not scanning: show the result right away
                 npub = publish_cloud(); print(f"zones: {len(zf.zones)} -> {npub} points", flush=True)
@@ -222,13 +261,13 @@ try:
         kw = dict(W=s.line_px, stride=s.line_bytes, skip=s.skip, black=float(s.black), threads=a.threads)
         H = (min(len(bL), len(bR)) // s.line_bytes) - s.skip
         cL = bin_raw10(bL, H=min(H, s.line_px), **kw); cR = bin_raw10(bR, H=min(H, s.line_px), **kw)
-        Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
         Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
+        Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
         T = Tt
         if origin and n_frames % 2 == 0: origin.submit(cL, mL["pose"])
-        if want_pt:                                     # depth-correct passthrough (STAGE frame, raw tracking pose)
+        if want_view:                                   # depth-correct passthrough (STAGE frame, raw tracking pose)
             n_pt += 1
-            ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt, colour_size=432 if want_view else 8))
+            ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt))
         if not fuse:
             continue
         t2 = time.monotonic()
