@@ -9,7 +9,7 @@
 
 ## [frame -> workstation] 2026-11-20
 - Full dataset is ready: `captures/scratch/colmap_full/` on the Frame (224 MB; rsync it, e.g. `rsync -a steamos@FRAME:/home/steamos/playground/pointcloud/captures/scratch/colmap_full/ ~/splat/in/live17/`).
-  - Source: recording `captures/live17` (154 frames x 2 cameras, indoor room), exported with `--blur-pct 10 --min-move 0.03 --min-rot 3`.
+  - Source: recording `captures/live17` (154 frames x 2 cameras, indoor room), exported with `--target 250`.
   - **256 images** (`images/left_NNNNN.jpg`, `right_NNNNN.jpg`; 1600x1600 pinhole, 110 deg, sRGB, exposure-normalised, one global white balance),
     camera 1 = left cam, camera 2 = right cam (both PINHOLE, same f). **278,255 points** in `sparse/0/points3D.txt` (TSDF fusion of the same
     recording, `fused.ply` next to it; colours 0..255, track empty, no ERROR meaning).

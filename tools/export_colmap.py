@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Recording -> COLMAP text dataset for Gaussian-splat training on a workstation (Brush / gsplat / OpenSplat / Nerfstudio).
 
-usage: export_colmap.py RECDIR OUTDIR [--ply fused.ply] [--fov 110] [--size 1600] [--min-move 0.05] [--min-rot 5]
-                        [--blur-pct 25] [--max-images 400] [--cams left,right]
+usage: export_colmap.py RECDIR OUTDIR [--ply fused.ply] [--fov 110] [--size 1600] [--target 300] [--density 1]
+                        [--blur-pct 15] [--cams left,right]
 
   * poses: SteamVR head pose of each camera's own exposure (STAGE frame, y up) x factory hand-eye -> COLMAP world-to-camera
     (COLMAP camera axes == OpenCV, which our calibration uses). Poses carry 10-20 mm drift: let the trainer refine them
@@ -10,8 +10,9 @@ usage: export_colmap.py RECDIR OUTDIR [--ply fused.ply] [--fov 110] [--size 1600
   * images: full-resolution RAW10 -> demosaic -> exposure-normalised (exp_lines x analog gain x digital gain, so the auto
     exposure does not make frames differ), one global white balance and scale for the whole recording -> sRGB -> fisheye
     (Kannala-Brandt) undistorted to a pinhole of --fov degrees. Floaters from AE changes are the classic splat artefact.
-  * frame selection: keep a frame when it moved > --min-move m or rotated > --min-rot deg from the last kept frame of the
-    same camera AND is not among the blurriest (--blur-pct percentile of Laplacian variance), capped at --max-images.
+  * image selection: drop the blurriest --blur-pct %, then greedy spatial decimation in (position, viewing direction): sharpest
+    first, keep an image when no kept view is nearer than a radius that shrinks where there are more features and where more time
+    was spent (--density), with the radius tuned to give about --target images.
   * points3D: optional fused cloud (PLY from pcserver / postprocess) used as the initial Gaussians.
 """
 import argparse, json, os, sys
@@ -23,8 +24,8 @@ from stills import upright
 ap = argparse.ArgumentParser()
 ap.add_argument("rec"); ap.add_argument("out")
 ap.add_argument("--ply"); ap.add_argument("--fov", type=float, default=110.0); ap.add_argument("--size", type=int, default=1600)
-ap.add_argument("--min-move", type=float, default=0.05); ap.add_argument("--min-rot", type=float, default=5.0)
-ap.add_argument("--blur-pct", type=float, default=25.0); ap.add_argument("--max-images", type=int, default=400)
+ap.add_argument("--target", type=int, default=300, help="about this many images, chosen for even spatial coverage"); ap.add_argument("--density", type=float, default=1.0, help="0 = uniform coverage, 1 = denser where there are more features / more time spent")
+ap.add_argument("--blur-pct", type=float, default=15.0)
 ap.add_argument("--cams", default="left,right"); ap.add_argument("--max-points", type=int, default=300000)
 a = ap.parse_args()
 
@@ -75,26 +76,47 @@ def load(s, i):
     return unpack_raw(open(os.path.join(a.rec, f"{i:05d}_{s}.y10p"), "rb").read())
 
 
-# 1) blur score on a cheap quarter-res grey image (exposure-normalised)
-score = {}
+# 1) per image: sharpness (exposure-normalised Laplacian variance) and feature richness (FAST corners) on a quarter-res grey image
+fast = cv2.FastFeatureDetector_create(threshold=12)
+score, feat = {}, {}
 for s, i, m in cand:
     raw = load(s, i).astype(np.float32)
     g = np.clip(raw[::4, ::4] - 64, 0, None) / exposure_factor(m)
-    g = g / max(np.percentile(g, 99), 1e-9)
-    score[(s, i)] = cv2.Laplacian(np.sqrt(np.clip(g, 0, 1)).astype(np.float32), cv2.CV_32F).var()
+    g = np.sqrt(np.clip(g / max(np.percentile(g, 99), 1e-9), 0, 1)).astype(np.float32)
+    score[(s, i)] = cv2.Laplacian(g, cv2.CV_32F).var()
+    feat[(s, i)] = len(fast.detect((g * 255).astype(np.uint8), None))
 thr = np.percentile(list(score.values()), a.blur_pct)
+pool = [(s, i, m, cam_pose(s, m)) for s, i, m in cand if score[(s, i)] >= thr]            # drop the blurriest
+print(f"{len(pool)} sharp enough (blur threshold {thr:.2e})")
 
-# 2) selection by motion
-keep = []; last = {}
-for s, i, m in cand:
-    if score[(s, i)] < thr: continue
-    T = cam_pose(s, m)
-    if s in last and np.linalg.norm(T[:3, 3] - last[s][:3, 3]) < a.min_move and rot_deg(T[:3, :3], last[s][:3, :3]) < a.min_rot: continue
-    last[s] = T; keep.append((s, i, m, T))
-if len(keep) > a.max_images:
-    idx = np.linspace(0, len(keep) - 1, a.max_images).round().astype(int); keep = [keep[k] for k in idx]
-print(f"{len(keep)} images selected (blur threshold {thr:.2e})")
-if not keep: sys.exit("nothing selected: relax --min-move/--min-rot/--blur-pct")
+# 2) spatial selection: view distance = |d position| + W * angle (W metres per radian); greedy in order of sharpness, an image
+#    is kept when no kept image is closer than its own radius r_i = r0 / density_i. density_i grows with feature richness and
+#    with dwell (how many candidate views were taken around there), so busy / lingered-at places get denser coverage and empty
+#    walls / transit get sparse coverage. r0 is bisected so that about --target images are kept (--density 0 = uniform coverage).
+W = 0.5
+pos = np.array([T[:3, 3] for *_, T in pool]); zax = np.array([T[:3, 2] for *_, T in pool])
+D = np.linalg.norm(pos[:, None] - pos[None], axis=2) + W * np.arccos(np.clip(zax @ zax.T, -1, 1))
+fe = np.array([feat[(s, i)] for s, i, *_ in pool], float); dw = (D < 0.25).sum(1).astype(float)
+dens = np.clip(np.sqrt(fe / max(np.median(fe), 1) * dw / max(np.median(dw), 1)), 0.5, 2.5) ** a.density
+order = np.argsort([-score[(s, i)] for s, i, *_ in pool])
+
+
+def select(r0):
+    kept = []
+    for k in order:
+        if not kept or D[k, kept].min() > r0 / dens[k]: kept.append(k)
+    return kept
+
+
+lo, hi = 0.005, 3.0
+for _ in range(25):
+    mid = (lo * hi) ** 0.5
+    if len(select(mid)) > a.target: lo = mid
+    else: hi = mid
+kept = sorted(select(hi), key=lambda k: (pool[k][1], pool[k][0]))
+keep = [pool[k] for k in kept]
+print(f"{len(keep)} images selected (r0 {hi:.3f} m-equivalent, density gain {a.density})")
+if not keep: sys.exit("nothing selected: raise --target / lower --blur-pct")
 
 # 3) global white balance / scale from a sample of the selected frames
 wbs, hi = [], []
