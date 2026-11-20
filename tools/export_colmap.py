@@ -20,12 +20,18 @@ import numpy as np, cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from livestereo import LiveStereo, unpack_raw
 from stills import upright
+import handmask
+import ctrl_overlay as co
 
 ap = argparse.ArgumentParser()
 ap.add_argument("rec"); ap.add_argument("out")
 ap.add_argument("--ply"); ap.add_argument("--fov", type=float, default=110.0); ap.add_argument("--size", type=int, default=1600)
 ap.add_argument("--target", type=int, default=300, help="about this many images, chosen for even spatial coverage"); ap.add_argument("--density", type=float, default=1.0, help="0 = uniform coverage, 1 = denser where there are more features / more time spent")
 ap.add_argument("--blur-pct", type=float, default=15.0)
+ap.add_argument("--masks", action="store_true", help="masks/<image>.png (255 keep, 0 ignore): fisheye border, own body / near things, dynamic objects vs the static map, controllers")
+ap.add_argument("--depth", action="store_true", help="depth/<image>.png 16-bit mm (800x800, 0 invalid) from the stereo depth of the same frame")
+ap.add_argument("--near", type=float, default=0.55, help="masks: ignore anything nearer than this (m) in the lower image half, and nearer than 0.7x this anywhere")
+ap.add_argument("--static-margin", type=float, default=0.15, help="masks: with --ply, ignore pixels nearer than the fused map by more than this (m)")
 ap.add_argument("--cams", default="left,right"); ap.add_argument("--max-points", type=int, default=300000)
 a = ap.parse_args()
 
@@ -132,6 +138,8 @@ Knew = np.array([[f_new, 0, N / 2 - 0.5], [0, f_new, N / 2 - 0.5], [0, 0, 1.]])
 maps = {s: cv2.fisheye.initUndistortRectifyMap(KB[s][0], KB[s][1], np.eye(3), Knew, (N, N), cv2.CV_16SC2) for s in sides}
 
 img_dir = os.path.join(a.out, "images"); sp = os.path.join(a.out, "sparse", "0")
+import shutil
+for sub in ("images", "masks", "depth"): shutil.rmtree(os.path.join(a.out, sub), ignore_errors=True)      # no leftovers of an earlier export
 os.makedirs(img_dir, exist_ok=True); os.makedirs(sp, exist_ok=True)
 with open(os.path.join(sp, "cameras.txt"), "w") as fc:
     fc.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
@@ -154,6 +162,88 @@ def qvec(R):
     q = np.array([w, x, y, z]); return q if w >= 0 else -q
 
 
+def read_ply(fn):
+    with open(fn, "rb") as fh:
+        props = []; n = 0
+        while True:
+            l = fh.readline().decode().strip()
+            if l.startswith("element vertex"): n = int(l.split()[-1])
+            elif l.startswith("property"): props.append(l.split()[1:])
+            elif l == "end_header": break
+        tm = {"float": "<f4", "double": "<f8", "uchar": "u1", "int": "<i4", "uint": "<u4", "short": "<i2", "ushort": "<u2"}
+        d = np.frombuffer(fh.read(), np.dtype([(nm, tm[t]) for t, nm in props]), count=n)
+    return np.stack([d["x"], d["y"], d["z"]], 1).astype(np.float64), np.stack([d["red"], d["green"], d["blue"]], 1)
+
+
+
+NM = N // 2; fm = f_new / 2; cm = (N / 2 - 0.5) / 2           # depth / mask working resolution (800)
+by_i = {r["i"]: r for r in recs}
+tracks = {}
+cfn = os.path.join(a.rec, "hmd_500hz.txt.controllers")
+if a.masks and os.path.exists(cfn): tracks = co.load_controllers(cfn)
+valid_fish = {}
+for s_ in sides:                                                    # fisheye image circle in the upright pinhole image
+    v = cv2.remap(np.full((2464, 2464), 255, np.uint8), *maps[s_], cv2.INTER_NEAREST)
+    if UP[s_][0] is not None: v = cv2.rotate(v, UP[s_][0])
+    valid_fish[s_] = cv2.erode(cv2.resize(v, (NM, NM), interpolation=cv2.INTER_NEAREST), np.ones((9, 9), np.uint8)) > 0
+if a.masks or a.depth:
+    os.makedirs(os.path.join(a.out, "depth"), exist_ok=True); os.makedirs(os.path.join(a.out, "masks"), exist_ok=True)
+map_pts = None
+if a.masks and a.ply: map_pts = read_ply(a.ply)[0]
+fcache = {}
+
+
+def zbuf(Pw, Tcam):
+    """world points -> depth image (NM x NM, 0 = none) in the upright pinhole of camera pose Tcam (min filter 3x3 closes the gaps)"""
+    Tc = np.linalg.inv(Tcam); Pc = Pw @ Tc[:3, :3].T + Tc[:3, 3]
+    ok = Pc[:, 2] > 0.1; Pc = Pc[ok]
+    u = np.round(fm * Pc[:, 0] / Pc[:, 2] + cm).astype(int); v = np.round(fm * Pc[:, 1] / Pc[:, 2] + cm).astype(int)
+    k = (u >= 0) & (u < NM) & (v >= 0) & (v < NM)
+    D = np.full(NM * NM, np.inf, np.float32); np.minimum.at(D, v[k] * NM + u[k], Pc[k, 2].astype(np.float32))
+    D = D.reshape(NM, NM); D[~np.isfinite(D)] = 1e6
+    D = cv2.erode(D, np.ones((3, 3), np.uint8)); D[D > 1e5] = 0
+    return D
+
+
+def frame_points(i):
+    """stereo depth of pair i as world points (and the hand-mask points), cached"""
+    if i in fcache: return fcache[i]
+    r = by_i[i]; hp = np.array(r["left"]["pose"] if r["left"].get("pose_valid") else r["right"]["pose"])      # head pose of the exposure
+    Zr, _, _ = ls.depth(load("left", i), load("right", i), far=4.0, half=False)
+    W = ls.world_from_rect(hp)
+    vv, uu = np.nonzero(Zr > 0); z = Zr[vv, uu]
+    Pr = np.stack([(uu - ls.P1[0, 2]) * z / ls.f, (vv - ls.P1[1, 2]) * z / ls.f, z], 1)
+    Pw = Pr @ W[:3, :3].T + W[:3, 3]
+    hw = np.zeros((0, 3))
+    if tracks:
+        hands = []
+        for role in (1, 2):
+            if role in tracks:
+                M = co.pose_at(tracks[role], r["left"]["ts"])
+                if M is not None: hands.append(M[:3, 3])
+        hm = handmask.hand_mask(Zr, np.linalg.inv(W), ls.f, ls.P1[0, 2], ls.P1[1, 2], hands)
+        hw = Pw[hm[vv, uu]]
+    fcache.clear(); fcache[i] = (Pw, hw); return fcache[i]
+
+
+def depth_and_mask(s, i, T):
+    Pw, hw = frame_points(i); D = zbuf(Pw, T)
+    if a.depth:
+        cv2.imwrite(os.path.join(a.out, "depth", f"{s}_{i:05d}.jpg.png"), np.clip(D * 1000, 0, 65535).astype(np.uint16))
+    if a.masks:
+        ign = ~valid_fish[s]
+        lower = np.zeros((NM, NM), bool); lower[NM // 2:] = True
+        ign |= (D > 0) & (((D < a.near) & lower) | (D < 0.7 * a.near))                    # own body / legs / things at the lens
+        if map_pts is not None:
+            Dm = zbuf(map_pts, T); ign |= (D > 0) & (Dm > 0) & (D < Dm - a.static_margin)  # moved objects, people
+        if len(hw):
+            Dh = zbuf(hw, T); ign |= cv2.dilate((Dh > 0).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+        ign = cv2.morphologyEx(ign.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))      # drop speckle
+        ign = cv2.dilate(ign, np.ones((7, 7), np.uint8)) > 0
+        mk = cv2.resize((~ign).astype(np.uint8) * 255, (N, N), interpolation=cv2.INTER_NEAREST)
+        cv2.imwrite(os.path.join(a.out, "masks", f"{s}_{i:05d}.jpg.png"), mk)
+
+
 with open(os.path.join(sp, "images.txt"), "w") as fi:
     fi.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n# (empty line: no 2D points)\n")
     for n, (s, i, m, T) in enumerate(keep, 1):
@@ -166,23 +256,11 @@ with open(os.path.join(sp, "images.txt"), "w") as fi:
         im = cv2.remap((x * 255).astype(np.uint8), *maps[s], cv2.INTER_LINEAR)
         if UP[s][0] is not None: im = cv2.rotate(im, UP[s][0])
         name = f"{s}_{i:05d}.jpg"; cv2.imwrite(os.path.join(img_dir, name), im, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if a.masks or a.depth: depth_and_mask(s, i, T)
         Tc = np.linalg.inv(T)                                   # world-to-camera
         q = qvec(Tc[:3, :3]); t = Tc[:3, 3]
         fi.write(f"{n} {q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {q[3]:.9f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} {cam_id[s]} {name}\n\n")
         if n % 25 == 0: print(f"  {n}/{len(keep)}", flush=True)
-
-
-def read_ply(fn):
-    with open(fn, "rb") as fh:
-        props = []; n = 0
-        while True:
-            l = fh.readline().decode().strip()
-            if l.startswith("element vertex"): n = int(l.split()[-1])
-            elif l.startswith("property"): props.append(l.split()[1:])
-            elif l == "end_header": break
-        tm = {"float": "<f4", "double": "<f8", "uchar": "u1", "int": "<i4", "uint": "<u4", "short": "<i2", "ushort": "<u2"}
-        d = np.frombuffer(fh.read(), np.dtype([(nm, tm[t]) for t, nm in props]), count=n)
-    return np.stack([d["x"], d["y"], d["z"]], 1).astype(np.float64), np.stack([d["red"], d["green"], d["blue"]], 1)
 
 
 npts = 0
