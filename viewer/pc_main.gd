@@ -103,6 +103,9 @@ var pal_holder: Node3D
 var passthrough: DepthPassthrough
 var tag_layer: TagLayer                   # fiducial + QR labels (tools/tags.py)
 var tags_on := true
+var plane_layer: PlaneLayer             # coarse fitted planes, 10 % translucent (tools/planes.py)
+var planes_on := false
+var plane_accum := 0.0
 var far_on := true                          # wide-baseline far-range depth (tools/farstereo.py)
 var tag_accum := 0.0
 var occlude := false                      # scene 90 % translucent where the real world (stereo depth) is closer
@@ -235,6 +238,10 @@ func _build_scene() -> void:
 	tag_layer = TagLayer.new()
 	tag_layer.path = SHM.path_join("pctags.json")
 	origin.add_child(tag_layer)
+	plane_layer = PlaneLayer.new()
+	plane_layer.path = SHM.path_join("pcplanes.json")
+	plane_layer.visible = false
+	origin.add_child(plane_layer)
 
 	model = SceneModel.new()
 	model.changed.connect(_on_model_changed)
@@ -304,6 +311,7 @@ func _build_scene() -> void:
 	palette.add_button("sel_label", "LABEL", 2, 6)
 	palette.add_button("tags", "TAGS", 0, 7)
 	palette.add_button("far", "FAR", 1, 7)
+	palette.add_button("planes", "PLANES", 2, 7)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -597,6 +605,12 @@ func _on_palette(id: String) -> void:
 			_say("tag labels ON: QR text + fiducial axes / IDs" if tags_on else "tag labels off")
 			_write_ctl()
 			_sync_palette()
+		"planes":
+			planes_on = not planes_on
+			plane_layer.visible = planes_on
+			_say("planes ON: floor / ceiling / walls fitted live, drawn 10 % translucent" if planes_on else "planes off")
+			_write_ctl()
+			_sync_palette()
 		"occlude":
 			occlude = not occlude
 			_say("occlusion ON: the cloud fades where real objects are closer" if occlude else "occlusion off")
@@ -640,6 +654,7 @@ func _sync_palette() -> void:
 	palette.set_active("occlude", occlude)
 	palette.set_active("tags", tags_on)
 	palette.set_active("far", far_on)
+	palette.set_active("planes", planes_on)
 	palette.set_active("zone_show", zones_shown)
 	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
 	for id in ["sel_delete", "sel_keep", "sel_label"]:
@@ -963,7 +978,7 @@ func _write_ctl() -> void:
 			hands.append(m12)
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
 		"aim": aim, "hands": hands, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
-		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on}
+		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on, "planes": planes_on}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -1039,6 +1054,10 @@ func _process(delta: float) -> void:
 	if tags_on and tag_accum >= 0.25:
 		tag_accum = 0.0
 		tag_layer.poll()
+	plane_accum += delta
+	if planes_on and plane_accum >= 0.5:
+		plane_accum = 0.0
+		plane_layer.poll()
 	var occ_live := occlude and Time.get_ticks_msec() - occ_ms < 1000
 	if occ_live != occ_shown:
 		occ_shown = occ_live

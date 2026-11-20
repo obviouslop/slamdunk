@@ -34,6 +34,7 @@ import fiducials
 from origin import OriginTracker
 from farstereo import FarStereo
 from tags import TagWatcher
+from planes import PlaneTracker
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--scale", type=float, default=0.35)
@@ -54,6 +55,8 @@ ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-
 ap.add_argument("--conf", action="store_true", help="weight TSDF observations by per-pixel confidence (texture / depth-edge); A/B showed no gain on floor thickness, see re/test_conf.py")
 ap.add_argument("--sat", type=float, default=1.4, help="point colour saturation boost (1 = raw white-balanced sensor colours)")
 ap.add_argument("--color-gamma", type=float, default=1.0, help="point colour mid-tone lift: <1 brightens (e.g. 0.7)")
+ap.add_argument("--no-planes", action="store_true", help="no live coarse plane fitting (tools/planes.py, viewer PLANES toggle)")
+ap.add_argument("--plane-hz", type=float, default=0.5, help="plane fitting rate (it extracts the whole fused cloud each time)")
 ap.add_argument("--no-far", action="store_true", help="no wide-baseline far-range depth (tools/farstereo.py)")
 ap.add_argument("--far-mb", type=float, default=100.0, help="size of the on-disk keyframe ring buffer for the far-range depth (MB)")
 ap.add_argument("--far-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "scratch", "far"))
@@ -195,6 +198,26 @@ threading.Thread(target=occ_loop, daemon=True).start()
 origin = None if a.no_origin else OriginTracker(ls, path=f"{SHM}/pcorigin.json")
 far = None if a.no_far else FarStereo(ls, a.far_dir, max_bytes=a.far_mb * 1e6, z_min=a.far_zmin, blur_px=a.far_blur)
 if far: far.start()
+planes_state = {"on": False, "reset": False}
+plane_tr = None if a.no_planes else PlaneTracker(path=f"{SHM}/pcplanes.json")
+
+
+def plane_loop():
+    """Fits planes to the fused cloud at --plane-hz while the viewer's PLANES toggle is on (ctl.planes), only when the map changed."""
+    last = None
+    while not stop:
+        time.sleep(1.0 / max(a.plane_hz, 0.05))
+        if plane_tr is None or not planes_state["on"]: last = None; continue
+        if planes_state["reset"]: planes_state["reset"] = False; plane_tr.clear(); last = None
+        key = (ts.frames, len(zf.zones))
+        if key == last: continue
+        try:
+            plane_tr.update(extract_kept()[0]); last = key
+        except Exception as e:
+            print("planes:", e, flush=True)
+
+
+threading.Thread(target=plane_loop, daemon=True).start()
 tagwatch = TagWatcher(ls, origin, path=f"{SHM}/pctags.json")      # fiducials + QR codes -> pctags.json (viewer labels them), also feeds the origin
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
@@ -231,6 +254,7 @@ def handle_cmd(ctl):
         c = ctl.get("cmd")
         if c == "reset":
             with lock: ts.reset()
+            planes_state["reset"] = True
             if far is not None: far.clear()
             print("map reset", flush=True)
         elif c == "save":
@@ -261,6 +285,7 @@ try:
         occ_state["on"] = bool(ctl and ctl.get("occlude")) and not want_view     # occlusion-only: its own fast low-res thread
         fuse = not (scan == "off" or (scan == "paint" and not painting))
         tagwatch.enabled = bool(ctl and ctl.get("tags"))
+        planes_state["on"] = bool(ctl and ctl.get("planes"))
         if not fuse and not want_view and not tagwatch.enabled:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if zf.poll():                     # zones edited while not scanning: show the result right away

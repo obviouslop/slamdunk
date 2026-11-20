@@ -756,3 +756,16 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   do not replicate. Not verified in the headset: tune with e.g. `--sat 1.6 --color-gamma 0.7` (`PCSERVER_ARGS="--sat 1.6" tools/pcsession.sh`).
 - Removed unused: tools/fuse_live.py, fuse_recording.py, stereo_depth.py, poserefine.py, plyrender.py; 17 one-off re/ scripts;
   src/rvrec*, rvstat, rvclock, bqdump, fmtprobe; stray notes.md; root data0.bin/layout0.bin dumps. (git history keeps them.)
+
+## 2026-11-20: live coarse plane fitting (PLANES)
+- tools/planes.py PlaneTracker: 5 cm voxel downsample -> iterative RANSAC with local triple sampling (small planes such as tables
+  get hit), SVD refit, snap to horizontal/vertical within 10 deg, biggest connected patch (10 cm raster) for the extents,
+  fill filter (>= 12 % of the quad: kills scattered noise slabs), duplicates of thick walls dropped, labels floor / ceiling /
+  table / wall / plane, tracking over updates (stable ids, EMA, must be seen twice, kept 4 updates after vanishing).
+  Published to /dev/shm/pcplanes.json. pcserver thread `plane_loop`: runs only while the viewer's PLANES toggle is on
+  (ctl.planes), at --plane-hz (0.5), only when the map changed; `--no-planes` disables. ~0.5 s per update on a 1.7 M-point map.
+- viewer/planes.gd PlaneLayer (10 % alpha quads, double sided, no depth write), toolbox PLANES (row 7, off by default).
+- Tests: re/test_planes.py (synthetic room), re/planes_ply.py (any saved PLY), viewer/tests/test_headless.gd (layer + toggle).
+- Real data (scan_20261120_194941): floor 5.4x9.8 m + ceiling found, no walls (they were barely scanned). The Nov 18 scan shows the
+  floor as a stack of horizontal layers 0.9-2.3 m (pre-foveation-fix drift) - planes expose that drift nicely.
+- Not yet seen in the headset.

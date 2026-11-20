@@ -113,7 +113,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 32, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 33, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()
@@ -193,6 +193,22 @@ func _late_b() -> void:
 	check(not bool(inst.get("far_on")) and not ip.buttons["far"]["active"], "FAR toggle switches the far-range depth off")
 	inst.call("_on_palette", "far")
 	inst.call("_on_palette", "tags")
+	# coarse planes: 10 % translucent quads from the server's pcplanes.json
+	var pl: PlaneLayer = inst.get("plane_layer")
+	check(not pl.visible and not bool(inst.get("planes_on")), "PLANES off by default")
+	pl.apply({"seq": 1, "items": [
+		{"id": 1, "label": "floor", "n": [0, 1, 0], "d": 0.0, "centre": [0.5, 0.0, -1.0], "u": [0, 0, -1], "v": [-1, 0, 0], "hu": 2.0, "hv": 1.5},
+		{"id": 2, "label": "wall", "n": [0, 0, 1], "d": 2.0, "centre": [0.0, 1.2, -2.0], "u": [1, 0, 0], "v": [0, 1, 0], "hu": 2.0, "hv": 1.25}]})
+	var fl: MeshInstance3D = pl.nodes[1]
+	check(pl.nodes.size() == 2 and fl.global_transform.origin.is_equal_approx(Vector3(0.5, 0, -1)), "plane quads placed at their STAGE poses")
+	check(is_equal_approx((fl.material_override as StandardMaterial3D).albedo_color.a, 0.10), "planes are 10 % opaque")
+	check(fl.global_transform.basis.z.is_equal_approx(Vector3(0, 1, 0)) and (fl.mesh as QuadMesh).size.is_equal_approx(Vector2(4.0, 3.0)), "quad normal / extents follow the plane")
+	pl.apply({"seq": 2, "items": [pl_item_keep()]})
+	await inst.get_tree().process_frame
+	check(pl.nodes.size() == 1, "vanished planes are removed")
+	inst.call("_on_palette", "planes")
+	check(pl.visible and ip.buttons["planes"]["active"], "PLANES toggle shows the planes")
+	inst.call("_on_palette", "planes")
 	# SELECT: per-tool buttons, brush selection -> exclusion zone, undo; zone file for the server
 	inst.call("_on_palette", "zone")
 	check(ip.buttons["zone_mode"]["enabled"] and not ip.buttons["sel_delete"]["enabled"], "ZONE shows its own toolbox row")
@@ -227,3 +243,7 @@ func _late_b() -> void:
 	inst.call("_undo")
 	inst.call("_on_palette", "scan")
 
+
+
+func pl_item_keep() -> Dictionary:
+	return {"id": 2, "label": "wall", "n": [0, 0, 1], "d": 2.0, "centre": [0.0, 1.2, -2.0], "u": [1, 0, 0], "v": [0, 1, 0], "hu": 2.0, "hv": 1.25}
