@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Glasgow UART -> PTY bridge for the GNSS receiver. Prints the PTY path and keeps a stable symlink /dev/shm/gps-nmea to it,
 # so tools/gnssd.py (pcsession.sh --gnss /dev/shm/gps-nmea) does not need to know the /dev/pts/N number.
+# GPS_SAVE=1 ./start-gps.sh   stores rate/baud/sentences in the receiver (BBR + flash) once; later starts then take the fast path.
 # usage: ./start-gps.sh [--gpsd]     (--gpsd additionally runs gpsd on the PTY, needs sudo; then gnssd must NOT read the PTY too)
 cd "$(dirname "$0")"
 GLASGOW=${GLASGOW:-$HOME/.local/bin/glasgow}
@@ -21,7 +22,7 @@ bridge() {   # bridge BAUD : (re)start the Glasgow UART->PTY bridge at this baud
   done
   [ -n "$pty" ] || { echo "no PTY found, see $LOG"; exit 1; }
 }
-cfg() { timeout 30 $PY -I tools/gnss_config.py "$pty" --hz "${GPS_HZ:-10}" "$@" >> "$LOG_CFG" 2>&1; }
+cfg() { timeout 30 $PY -I tools/gnss_config.py "$pty" --hz "${GPS_HZ:-10}" ${GPS_SAVE:+--save} "$@" >> "$LOG_CFG" 2>&1; }
 : > "$LOG_CFG"
 # The receiver keeps its RAM settings while powered, so try the target baud first; otherwise configure at the default 38400
 # (rate, sentences, then the UART baud switch last) and reopen the bridge at the new rate.
