@@ -734,3 +734,14 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   a degenerate rectification (fixed afterwards by rejecting fp/B <= 0, not re-checked). Needs a live 10 fps session with sideways
   motion; use `re/test_far.py` on a new recording (compares each pair with the reference frame's own stereo depth in 1.2-3.8 m).
   Forward walking gives epipoles inside the image: not supported yet (would need plane-sweep matching instead of rectification).
+
+## Far stereo: epipolar (polar) rectification, GNSS bridge, launchers
+* farstereo.py now rectifies every pair in epipolar-plane coordinates around the baseline (row = plane angle, column = angle phi to
+  the baseline, SGBM reference = the camera at the far end of the baseline): works for any baseline direction incl. forward motion;
+  the cone phi < 18 deg around the epipole is left out (`cone_deg`). range r = B sin(phi_A)/sin(delta), sigma_r = r*sqrt((sigma_d*dphi/tan delta)^2 + (sigma_B/B)^2).
+  live17 (indoor, 1 fps): 9/213 pairs accepted (was 4/194); vs the near stereo |e|/sigma median 0.5-1.6 (model about right). Outdoor
+  validation still needs a live walking session.
+* start-gps.sh: Glasgow UART->PTY bridge; finds the PTY (log regex, else new /dev/pts entry) and symlinks /dev/shm/gps-nmea.
+  tools/launch-session.sh [record] (starts the bridge if glasgow is installed, then pcsession.sh --gnss /dev/shm/gps-nmea) and
+  tools/stop-session.sh back the .desktop files (~/.local/share/applications and ~/Desktop: Point Cloud Session, with "Start and record"/"Stop" actions; Point Cloud Stop).
+  Logs: captures/logs/launcher.log, gps.log, glasgow.log. UNTESTED with the hardware (Glasgow's PTY log format unknown; fallback = pts diff).

@@ -32,11 +32,11 @@ def _rot_angle(R):
 class FarStereo:
     def __init__(self, ls, directory, max_bytes=100e6, z_min=2.5, z_max=80.0, rel_sigma=0.12, sigma_d=1.0, sigma_b=0.015,
                  min_base=0.30, max_base=5.0, max_view_deg=35.0, blur_px=1.0, near_frac=0.2, min_gap_s=0.4, period=2.0,
-                 max_points=400000, jpeg_q=88):
+                 max_points=400000, jpeg_q=88, cone_deg=18.0):
         self.ls = ls; self.dir = directory; self.max_bytes = int(max_bytes)
         self.z_min = z_min; self.z_max = z_max; self.rel_sigma = rel_sigma; self.sigma_d = sigma_d; self.sigma_b = sigma_b
         self.min_base = min_base; self.max_base = max_base; self.max_view = max_view_deg; self.blur_px = blur_px
-        self.near_frac = near_frac; self.min_gap = min_gap_s; self.period = period; self.max_points = max_points; self.jpeg_q = jpeg_q
+        self.near_frac = near_frac; self.min_gap = min_gap_s; self.period = period; self.max_points = max_points; self.jpeg_q = jpeg_q; self.cone_deg = cone_deg
         self.K = np.array([[ls.f, 0, ls.P1[0, 2]], [0, ls.f, ls.P1[1, 2]], [0, 0, 1.0]])
         self.enabled = True
         self.kfs = collections.OrderedDict()       # seq -> dict(seq, path, size, T, ts)
@@ -127,8 +127,6 @@ class FarStereo:
             if not (self.min_base <= B <= self.max_base): continue
             ang = np.degrees(np.arccos(np.clip(k["T"][:3, 2] @ j["T"][:3, 2], -1, 1)))
             if ang > self.max_view: continue
-            if abs(d @ k["T"][:3, 2]) / B > 0.85: continue            # baseline along the viewing axis: epipole in the image
-            if abs(d @ k["T"][:3, 1]) > abs(d @ k["T"][:3, 0]): continue   # (mostly) vertical baseline: SGBM here searches along x only
             out.append((abs(np.log(B / 1.0)) + ang / 30.0, j))        # prefer ~1 m baselines, parallel views
         out.sort(key=lambda x: x[0]); return [j for _, j in out[:n]]
 
@@ -187,58 +185,110 @@ class FarStereo:
         if why['rot_diff'] > 6.0: return self._rej(why, 'rotation disagrees with tracker')
         why['dir_diff'] = float(np.degrees(np.arccos(np.clip(tt @ M[:3, 3] / Bl, -1, 1))))
         if why['dir_diff'] > 20.0: return self._rej(why, 'baseline direction disagrees')
-        Tt = (tt * Bl).reshape(3, 1); size = (A.shape[1], A.shape[0]); D0 = np.zeros(5)
-        T1, T2, I1, I2 = ka["T"], kb["T"], A, Bm
-        for _ in range(2):
-            R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(self.K, D0, self.K, D0, size, R, Tt, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
-            if P2[0, 3] < 0: break                                   # camera 2 is to the right of camera 1 in the rectified pair
-            R, Tt = R.T, -R.T @ Tt.reshape(3, 1); T1, T2, I1, I2 = T2, T1, I2, I1  # swap the roles
-            ka, kb = kb, ka; pa, pb = pb, pa
+        return self._polar_points(ka, kb, A, Bm, R, tt, Bl, pa, pb, work, why)
+
+    # ------------------------------------------------------------------ epipolar (polar) rectification + SGBM
+    def _polar_points(self, ka, kb, A, Bm, R, tt, Bl, pa, pb, work, why):
+        """Rectify the pair in epipolar-plane coordinates around the baseline axis b (any baseline direction, also forward motion):
+        row = angle alpha of the epipolar plane around b, column = angle phi between the ray and b.  Epipolar lines are exact
+        rows, a point at phi in the reference (far end of the baseline, camera B) is at phi - delta in the other (A) where
+        delta = parallax angle, so SGBM (reference = B, match at x - d) gives  range r_B = B sin(phi_B - delta)/sin(delta).
+        Columns start at phi_min (the cone around the epipole, where parallax vanishes, is left out)."""
+        X_B = lambda X: X @ R.T                                        # camera A frame -> camera B frame (rotation part)
+        b = -R.T @ tt; b /= np.linalg.norm(b)                          # B's centre in A's frame, unit
+        zr = np.array([0.0, 0.0, 1.0]) - b[2] * b
+        if np.linalg.norm(zr) < 0.3: zr = np.array([1.0, 0.0, 0.0]) - b[0] * b
+        zr /= np.linalg.norm(zr); yr = np.cross(zr, b); xr = b         # alpha = 0 -> optical-axis side
+        fw = self.K[0, 0] * work; cxw = (self.K[0, 2] + 0.5) * work - 0.5; cyw = (self.K[1, 2] + 0.5) * work - 0.5
+        h, w = int(round(A.shape[0] * work)), int(round(A.shape[1] * work))
+        dphi = 1.0 / fw
+        ph0, ph1 = np.radians(self.cone_deg), np.radians(130.0)
+        phis = ph0 + np.arange(int((ph1 - ph0) / dphi)) * dphi
+        nal = int(np.ceil(2 * np.pi / dphi))
+        als = np.arange(nal) * dphi - np.pi
+        cp, sp = np.cos(phis)[None, :, None], np.sin(phis)[None, :, None]
+        ca, sa = np.cos(als)[:, None, None], np.sin(als)[:, None, None]
+        dA = cp * xr + sp * (ca * zr + sa * yr)                        # (nal, nphi, 3) rays in camera A
+        dB = X_B(dA)
+        def pix(d):
+            z = d[..., 2]; ok = z > 0.05; zz = np.where(ok, z, 1.0)
+            u = fw * d[..., 0] / zz + cxw; v = fw * d[..., 1] / zz + cyw
+            ok &= (u > 3) & (u < w - 4) & (v > 3) & (v < h - 4)
+            return u.astype(np.float32), v.astype(np.float32), ok
+        uA, vA, okA = pix(dA); uB, vB, okB = pix(dB)
+        ok = okA & okB
+        rows = ok.sum(1) >= 24
+        if rows.sum() < 40: return self._rej(why, 'no common view (polar)')
+        # cut the (cyclic) row range at the longest gap of unusable rows, crop the columns to the usable range
+        if not rows.all():
+            rr = np.r_[rows, rows]; best, bs, run = 0, 0, 0
+            for i, x in enumerate(rr):
+                run = 0 if x else run + 1
+                if run > best: best, bs = run, i + 1
+            start = bs % nal
         else:
-            why['P2'] = P2[:2, 3].tolist(); why['Tt'] = Tt.ravel().round(3).tolist()
-            return self._rej(why, 'rectify')
-        fp = float(P1[0, 0]); cx, cy = float(P1[0, 2]), float(P1[1, 2]); Br = float(-P2[0, 3] / fp)
-        if fp <= 0 or Br <= 0: return self._rej(why, 'degenerate rectification')
-        m1 = cv2.initUndistortRectifyMap(self.K, D0, R1, P1, size, cv2.CV_16SC2); m2 = cv2.initUndistortRectifyMap(self.K, D0, R2, P1, size, cv2.CV_16SC2)
-        r1 = cv2.remap(I1, *m1, cv2.INTER_LINEAR); r2 = cv2.remap(I2, *m2, cv2.INTER_LINEAR)
-        g1 = cv2.resize(cv2.cvtColor(r1, cv2.COLOR_RGB2GRAY), None, fx=work, fy=work, interpolation=cv2.INTER_AREA)
-        g2 = cv2.resize(cv2.cvtColor(r2, cv2.COLOR_RGB2GRAY), None, fx=work, fy=work, interpolation=cv2.INTER_AREA)
-        dmax_full = fp * Br / max(self.z_min, 1.0); nd = int(min(256, np.ceil(dmax_full * work / 16 + 1) * 16))
-        bs = 5
-        sg = cv2.StereoSGBM_create(0, nd, bs, 8 * bs * bs, 32 * bs * bs, 1, 31, 12, 120, 2, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
-        d = sg.compute(g1, g2).astype(np.float32) / 16.0                # half-res px
-        # pair verification with the sparse matches: rectified rows must agree (vertical error ~ 0) and SGBM must reproduce the
-        # matches' disparities, otherwise the relative pose / the dense matching of this pair is wrong -> discard the pair
-        q1 = cv2.undistortPoints(pa.reshape(-1, 1, 2), self.K, D0, R=R1, P=P1).reshape(-1, 2); q2 = cv2.undistortPoints(pb.reshape(-1, 1, 2), self.K, D0, R=R2, P=P1).reshape(-1, 2)
-        dy = np.abs(q1[:, 1] - q2[:, 1]); dm = q1[:, 0] - q2[:, 0]
+            start = 0
+        ridx = (start + np.arange(nal)) % nal
+        if not rows.all(): ridx = ridx[:nal - int(best)] if best else ridx
+        cols = np.nonzero(ok[ridx].sum(0) >= 24)[0]
+        c0, c1 = int(cols[0]), int(cols[-1]) + 1
+        sub = np.ix_(ridx, np.arange(c0, c1))
+        uA, vA, uB, vB, ok = uA[sub], vA[sub], uB[sub], vB[sub], ok[sub]
+        al_r = als[ridx]; ph_c = phis[c0:c1]
+        why['rect'] = (int(len(ridx)), int(c1 - c0))
+        if len(ridx) * (c1 - c0) > 1.2e6: return self._rej(why, 'rectified image too large')
+        gA = cv2.cvtColor(cv2.resize(A, (w, h), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+        gB = cv2.cvtColor(cv2.resize(Bm, (w, h), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+        rA = cv2.remap(gA, uA, vA, cv2.INTER_LINEAR); rB = cv2.remap(gB, uB, vB, cv2.INTER_LINEAR)
+        rA[~ok] = 0; rB[~ok] = 0
+        dmax = Bl / max(self.z_min, 1.0) / dphi * 1.05
+        nd = int(min(256, np.ceil(dmax / 16 + 1) * 16))
+        if c1 - c0 < nd + 16: nd = int((c1 - c0 - 16) // 16 * 16)
+        if nd < 16: return self._rej(why, 'rectified image too narrow')
+        bs_ = 5
+        sg = cv2.StereoSGBM_create(0, nd, bs_, 8 * bs_ * bs_, 32 * bs_ * bs_, 1, 31, 12, 120, 2, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+        d = sg.compute(rB, rA).astype(np.float32) / 16.0               # reference = B; match in A at x - d
+        # pair verification with the sparse matches (rows must coincide, SGBM must reproduce their parallax)
+        def to_ar(p, Rm):
+            dd = cv2.undistortPoints(p.reshape(-1, 1, 2).astype(np.float64), self.K, np.zeros(5)).reshape(-1, 2)
+            dd = np.c_[dd, np.ones(len(dd))]; dd /= np.linalg.norm(dd, axis=1, keepdims=True)
+            return (np.arctan2(dd @ (Rm @ yr), dd @ (Rm @ zr)), np.arccos(np.clip(dd @ (Rm @ xr), -1, 1)))
+        aA, fA = to_ar(pa, np.eye(3)); aB, fB = to_ar(pb, R)
+        dy = np.abs(np.angle(np.exp(1j * (aA - aB)))) / dphi; dm = (fB - fA) / dphi
         inl = dy < 3.0; why['dy_med'] = float(np.median(dy[inl])) if inl.any() else 99.0
-        ix = np.clip(np.round(q1[:, 0] * work).astype(int), 0, d.shape[1] - 1); iy = np.clip(np.round(q1[:, 1] * work).astype(int), 0, d.shape[0] - 1)
-        ds = d[iy, ix] / work; sel = inl & (ds > 1.5 / work) & (dm > 0)
+        ar_pos = np.angle(np.exp(1j * (aB - al_r[0]))) % (2 * np.pi)
+        ix = np.round((fB - ph_c[0]) / dphi).astype(int); iy = np.round(ar_pos / dphi).astype(int)
+        inb = (ix >= 0) & (ix < d.shape[1]) & (iy >= 0) & (iy < d.shape[0])
+        ds = np.full(len(pa), -1.0); ds[inb] = d[iy[inb], ix[inb]]
+        sel = inl & inb & (dm > 1.5) & (dm < nd - 6)                      # matches nearer than z_min are outside the search range
         why['sgbm_agree'] = float(np.mean(np.abs(ds[sel] - dm[sel]) < 2.0)) if sel.sum() >= 10 else 0.0
-        why['n_check'] = int(sel.sum())
+        why['n_check'] = int(sel.sum()); why['dbg'] = (int(inl.sum()), int(inb.sum()), int((dm > 0).sum()), int((ds > 1.5).sum()), float(np.median(dm)) if len(dm) else 0.0)
         if why['dy_med'] > 0.8: return self._rej(why, 'rows misaligned')
         if why['sgbm_agree'] < 0.6: return self._rej(why, 'dense matching disagrees with sparse matches')
         valid = d >= 1.5
         med = cv2.medianBlur(np.where(valid, d, 0).astype(np.float32), 5)
         valid &= np.abs(d - med) < np.maximum(1.0, 0.04 * d)                   # flying pixels / depth jumps
-        black = cv2.erode((g1 > 3).astype(np.uint8), np.ones((9, 9), np.uint8)) & cv2.erode((g2 > 3).astype(np.uint8), np.ones((9, 9), np.uint8))
-        valid &= black > 0
-        step = 3; sl = np.zeros_like(valid); sl[::step, ::step] = True; valid &= sl
+        valid &= cv2.erode(ok.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+        sl = np.zeros_like(valid); sl[::3, ::3] = True; valid &= sl
         v, u = np.nonzero(valid)
         if not len(v): return self._rej(why, 'no disparity')
-        dfull = d[v, u] / work; z = fp * Br / dfull
-        sig = self.sigma_z(z, Br)
-        k = (z >= self.z_min) & (z <= self.z_max) & (sig / z <= self.rel_sigma)
-        v, u, z, sig = v[k], u[k], z[k], sig[k]
-        if not len(z): return self._rej(why, 'all points gated')
-        uu = (u + 0.5) / work - 0.5; vv = (v + 0.5) / work - 0.5
-        Xr = np.stack([(uu - cx) / fp * z, (vv - cy) / fp * z, z], 1)
-        Xc = Xr @ R1                                                    # R1.T applied to row vectors: rect1 -> camera 1
-        Pw = Xc @ T1[:3, :3].T + T1[:3, 3]
-        col = r1[np.clip(np.round(vv).astype(int), 0, size[1] - 1), np.clip(np.round(uu).astype(int), 0, size[0] - 1)]
-        why.update(Br=Br, nd=nd)
-        return dict(P=Pw.astype(np.float32), C=col, sig=sig.astype(np.float32), z=np.linalg.norm(Xc, axis=1).astype(np.float32),
-                    ref=ka["seq"], other=kb["seq"], B=Br)
+        delta = d[v, u] * dphi; phB = ph_c[u]; phA = phB - delta
+        good = (phA > 0.02) & (delta > 1e-4)
+        v, u, delta, phB, phA = v[good], u[good], delta[good], phB[good], phA[good]
+        r = Bl * np.sin(phA) / np.sin(delta)
+        sig = r * np.sqrt((self.sigma_d * dphi / np.tan(delta)) ** 2 + (self.sigma_b / Bl) ** 2)
+        k = (r >= self.z_min) & (r <= self.z_max) & (sig / r <= self.rel_sigma)
+        v, u, r, sig = v[k], u[k], r[k], sig[k]
+        if not len(r): return self._rej(why, 'all points gated')
+        dirs = dB[ridx[v], c0 + u]                                       # rays in camera B (unit)
+        Xc = dirs * r[:, None]
+        Pw = Xc @ kb["T"][:3, :3].T + kb["T"][:3, 3]
+        col = (np.stack([uB[v, u], vB[v, u]], 1))
+        col = A_col = Bm[np.clip(np.round((col[:, 1] + 0.5) / work - 0.5).astype(int), 0, Bm.shape[0] - 1),
+                          np.clip(np.round((col[:, 0] + 0.5) / work - 0.5).astype(int), 0, Bm.shape[1] - 1)]
+        why.update(Br=Bl, nd=nd, phi_min=float(np.degrees(ph_c[0])))
+        return dict(P=Pw.astype(np.float32), C=col, sig=sig.astype(np.float32), z=r.astype(np.float32),
+                    ref=kb["seq"], other=ka["seq"], B=Bl)
 
     # ------------------------------------------------------------------ store of far points
     def merge(self, b, ts):
