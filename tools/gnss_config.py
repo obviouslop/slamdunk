@@ -48,11 +48,15 @@ def main():
     items += [(("%s on" if n in on else "%s off") % n, (k, "<B"), 1 if n in on else 0) for n, k in NMEA.items()]
     layers = 7 if a.save else 1                                  # 1 RAM, 2 battery-backed RAM, 4 flash
     if a.baud: items.append(("baud %d" % a.baud, KEYS["BAUD"], a.baud))
-    bad = 0
+    bad = 0; tried = [layers] + [l for l in (3, 1) if l < layers]
     for n_, (name, (k, fmt), v) in enumerate(items):
-        r = send_wait_ack(fd, valset(k, fmt, v, layers), timeout=2.5 if n_ == 0 else 1.5); bad += r is not True
+        for li, ly in enumerate(tried):                         # fall back: RAM+BBR+flash -> RAM+BBR -> RAM
+            r = send_wait_ack(fd, valset(k, fmt, v, ly), timeout=2.5 if n_ == 0 else 1.5)
+            if r is not False: break
         if n_ == 0 and r is None: print("  receiver does not answer at this baud rate"); sys.exit(2)
-        print(f"  {name:14s} {'ACK' if r else 'NAK (key not accepted)' if r is False else 'no answer (TX wired? baud?)'}")
+        if r and li: tried = tried[li:]; print(f"  (layers {layers} refused, using {ly}: {'RAM only' if ly == 1 else 'RAM+BBR'})")
+        bad += r is not True
+        print(f"  {name:14s} {'ACK' if r else 'NAK (key not accepted)' if r is False else 'no answer (TX wired? baud?)'}  [layers {ly}]")
     sys.exit(1 if bad else 0)
 
 
