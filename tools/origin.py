@@ -53,7 +53,11 @@ class OriginTracker:
         if self.calls % self.every: return self.state
         g = cv2.cvtColor(cL, cv2.COLOR_BGR2GRAY)
         g8 = np.clip(g * (255 / max(float(np.percentile(g[::4, ::4], 99.7)), 1.0)), 0, 255).astype(np.uint8)
-        dets = [d for d in F.detect(g8, min_edge=7, blocks=(31,)) if d["id"] in self.ids and d["ham"] <= 1 and d["edge_px"] >= self.min_edge * 0.5]
+        return self.feed(F.detect(g8, min_edge=7, blocks=(31,)), pose34)
+
+    def feed(self, dets, pose34):
+        """dets: fiducials.detect() output on the half-resolution left image (any ids; the origin id is picked here)."""
+        dets = [d for d in dets if d["id"] in self.ids and d["ham"] <= 1 and d["edge_px"] >= self.min_edge * 0.5]
         if not dets: self._write(); return self.state
         d = max(dets, key=lambda x: x["edge_px"])
         H = np.eye(4); H[:3, :] = np.asarray(pose34); W = H @ self.ls.head_from_camL

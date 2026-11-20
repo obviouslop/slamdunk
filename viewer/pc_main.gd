@@ -101,6 +101,9 @@ var ret_mat: StandardMaterial3D
 var palette: Palette
 var pal_holder: Node3D
 var passthrough: DepthPassthrough
+var tag_layer: TagLayer                   # fiducial + QR labels (tools/tags.py)
+var tags_on := true
+var tag_accum := 0.0
 var occlude := true                       # scene 90 % translucent where the real world (stereo depth) is closer
 var occ_shown := false
 var occ_ms := 0                           # last time an occlusion frame arrived
@@ -228,6 +231,9 @@ func _build_scene() -> void:
 	passthrough = DepthPassthrough.new()      # depth-correct camera view (toolbox: DEPTH VIEW)
 	passthrough.path = SHM.path_join("pcpass.bin")
 	origin.add_child(passthrough)
+	tag_layer = TagLayer.new()
+	tag_layer.path = SHM.path_join("pctags.json")
+	origin.add_child(tag_layer)
 
 	model = SceneModel.new()
 	model.changed.connect(_on_model_changed)
@@ -295,6 +301,7 @@ func _build_scene() -> void:
 	palette.add_button("sel_delete", "DELETE", 0, 6)
 	palette.add_button("sel_keep", "KEEP ONLY", 1, 6)
 	palette.add_button("sel_label", "LABEL", 2, 6)
+	palette.add_button("tags", "TAGS", 0, 7)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -464,7 +471,7 @@ func _on_button(action: String, hand: String) -> void:
 				_point_size(1)
 			"view_button", "menu_button":
 				_toggle_palette()
-			"bumper", "x_button":         # dedicated STILL button (left index finger): stereo still + next composited frame, no toolbox
+			"bumper":                     # dedicated STILL button (left index finger): stereo still + next composited frame, no toolbox
 				_still()
 	_write_ctl()
 
@@ -577,6 +584,12 @@ func _on_palette(id: String) -> void:
 			_say("objects cleared")
 		"pass":
 			_toggle_passthrough()
+		"tags":
+			tags_on = not tags_on
+			tag_layer.visible = tags_on
+			_say("tag labels ON: QR text + fiducial axes / IDs" if tags_on else "tag labels off")
+			_write_ctl()
+			_sync_palette()
 		"occlude":
 			occlude = not occlude
 			_say("occlusion ON: the cloud fades where real objects are closer" if occlude else "occlusion off")
@@ -618,6 +631,7 @@ func _sync_palette() -> void:
 	palette.set_active("help", help.visible)
 	palette.set_active("pass", passthrough.visible)
 	palette.set_active("occlude", occlude)
+	palette.set_active("tags", tags_on)
 	palette.set_active("zone_show", zones_shown)
 	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
 	for id in ["sel_delete", "sel_keep", "sel_label"]:
@@ -941,7 +955,7 @@ func _write_ctl() -> void:
 			hands.append(m12)
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
 		"aim": aim, "hands": hands, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
-		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude}
+		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -1013,6 +1027,10 @@ func _process(delta: float) -> void:
 		if passthrough.poll():
 			occ_ms = Time.get_ticks_msec()
 			passthrough.apply_occlusion(mat)
+	tag_accum += delta
+	if tags_on and tag_accum >= 0.25:
+		tag_accum = 0.0
+		tag_layer.poll()
 	var occ_live := occlude and Time.get_ticks_msec() - occ_ms < 1000
 	if occ_live != occ_shown:
 		occ_shown = occ_live

@@ -673,8 +673,21 @@ TODO: depth-correct own passthrough (user approved).
 - Capture delay is unchanged (the pair is grabbed first; saving takes ~1.1 s after that); the composited thread starts at the trigger:
   in a --record session it waits for the next composited/c_*.jpg newer than the trigger, otherwise it grabs ONE frame from
   /dev/video99 with ffmpeg (not exercised yet: tested with a simulated composited dir -> next frame picked, older one skipped).
-- Viewer: left bumper (or left X) = STILL, no toolbox needed (right X still works).
+- Viewer: left bumper = STILL, no toolbox needed (the left controller has no X: ABXY are on the right only; right X still works).
 - tools/stillview.py still.tiff [--open]: self-contained HTML viewer - anaglyph (red-cyan, convergence shift), side-by-side
   parallel / cross-eyed, blink, left / right upright, depth overlay, composited; click = stereo depth + camera / STAGE
   coordinates, two clicks = distance. Syntax-checked with node, NOT yet tried in a browser (no browser here).
 - Lesson: libraries can simply be installed (uv pip install --python .venv/bin/python PKG); the venv has no pip.
+
+## 2026-11-20 QR + fiducial labels in the headset
+- tools/tags.py (TagWatcher, worker thread in pcserver, enabled by the viewer's TAGS toggle, default on): per frame detects all
+  known fiducials (boards solved jointly when >= 2 tags are seen; a lone tag takes the PnP solution whose normal is closest to a world
+  axis) and decodes QR codes with zxing-cpp (installed with uv; OpenCV's QR detectors failed on the real phone-screen capture
+  captures/qr, zxing-cpp reads it in ~30 ms). QR has no known size: its 3-D placement comes from the stereo depth inside its polygon
+  (plane fit -> centre, normal, size, corners; text orientation from the code's own top edge). Items persist 20 s after last seen and are
+  published to /dev/shm/pctags.json; the origin marker (id 4) is fed from the same detections (tools/origin.py feed()).
+- viewer/tags.gd (TagLayer): fiducials = origin dot, tiny XYZ axes (red/green/blue, length 0.5 x marker size, 2-8 cm) with x/y/z
+  letters and "ID n"; QR = decoded text flat on the code with a dark backing fitted to its size. Toolbox: TAGS (new row 7).
+- Tested: synthetic fidsyn frames (tag poses within the injected 4 mm tracker error), the real QR image with a fake depth plane
+  (decoded "Hello claude"), viewer fixtures, server replay without errors. NOT yet seen in the headset; QR depth placement needs a
+  real scene with valid stereo depth on the code (a phone screen / glossy print may have none).

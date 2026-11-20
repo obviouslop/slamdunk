@@ -32,6 +32,7 @@ import handmask
 import floor as floormod
 import fiducials
 from origin import OriginTracker
+from tags import TagWatcher
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--scale", type=float, default=0.35)
@@ -176,6 +177,7 @@ def occ_loop():
 
 threading.Thread(target=occ_loop, daemon=True).start()
 origin = None if a.no_origin else OriginTracker(ls, path=f"{SHM}/pcorigin.json")
+tagwatch = TagWatcher(ls, origin, path=f"{SHM}/pctags.json")      # fiducials + QR codes -> pctags.json (viewer labels them), also feeds the origin
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
 last_frame = -1; n_pt = 0; t_frame_status = 0.0; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
@@ -239,7 +241,8 @@ try:
         want_view = a.passthrough or bool(ctl and ctl.get("passthrough"))          # viewer shows the camera image (needs colour)
         occ_state["on"] = bool(ctl and ctl.get("occlude")) and not want_view     # occlusion-only: its own fast low-res thread
         fuse = not (scan == "off" or (scan == "paint" and not painting))
-        if not fuse and not want_view:
+        tagwatch.enabled = bool(ctl and ctl.get("tags"))
+        if not fuse and not want_view and not tagwatch.enabled:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if zf.poll():                     # zones edited while not scanning: show the result right away
                 npub = publish_cloud(); print(f"zones: {len(zf.zones)} -> {npub} points", flush=True)
@@ -264,7 +267,7 @@ try:
         Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
         Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
         T = Tt
-        if origin and n_frames % 2 == 0: origin.submit(cL, mL["pose"])
+        tagwatch.submit(cL, mL["pose"], Z)
         if want_view:                                   # depth-correct passthrough (STAGE frame, raw tracking pose)
             n_pt += 1
             ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt))

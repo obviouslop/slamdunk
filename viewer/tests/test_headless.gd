@@ -113,7 +113,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 30, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 31, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()
@@ -172,6 +172,23 @@ func _late_b() -> void:
 	check(om.get_shader_parameter("occ_depth") == dp.depth_tex and float(om.get_shader_parameter("occ_block")) == float(dp.mat.get_shader_parameter("block")), "occlusion uniforms handed to the cloud shader")
 	inst.call("_on_palette", "pass")
 	check(not dp.visible, "DEPTH VIEW off")
+	# tag labels (fiducial axes + ID, QR text) from the server's pctags.json
+	var tl: TagLayer = inst.get("tag_layer")
+	tl.apply({"seq": 1, "items": [
+		{"key": "fid:3:0", "kind": "fid", "id": 3, "T": [1, 0, 0, 0.5, 0, 1, 0, 1.0, 0, 0, 1, -2.0], "size": 0.05, "ntag": 4},
+		{"key": "qr:hi:1", "kind": "qr", "text": "Hello", "T": [0, 0, 1, 1.0, 1, 0, 0, 1.5, 0, 1, 0, -1.0], "size": 0.1}]})
+	check(tl.nodes.size() == 2 and (tl.nodes["fid:3:0"] as Node3D).position.is_equal_approx(Vector3(0.5, 1.0, -2.0)), "tag labels created at their STAGE poses")
+	var qrl := ""
+	for c in tl.nodes["qr:hi:1"].get_children():
+		if c is Label3D:
+			qrl = (c as Label3D).text
+	check(qrl == "Hello", "QR text label")
+	tl.apply({"seq": 2, "items": []})
+	await inst.get_tree().process_frame
+	check(tl.nodes.is_empty(), "tag labels removed when the server drops them")
+	inst.call("_on_palette", "tags")
+	check(not tl.visible and not ip.buttons["tags"]["active"], "TAGS toggle hides the labels")
+	inst.call("_on_palette", "tags")
 	# SELECT: per-tool buttons, brush selection -> exclusion zone, undo; zone file for the server
 	inst.call("_on_palette", "zone")
 	check(ip.buttons["zone_mode"]["enabled"] and not ip.buttons["sel_delete"]["enabled"], "ZONE shows its own toolbox row")
