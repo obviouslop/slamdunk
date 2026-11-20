@@ -614,3 +614,20 @@ TODO: depth-correct own passthrough (user approved).
   registered to the same real-world origin. Live pose correction is NOT applied yet (only offline via fid_analyze).
 - Not yet measured on real captures (the boards were just printed): next step is a recording with the boards on ceiling /
   floor / table and the origin marker, then `fid_analyze.py captures/liveN --hmd500 --refit --write-corrected`.
+
+## 2026-11-20 live17 (first boards + origin marker recording) and Open3D
+- tools/fid_analyze.py captures/live17 (154 frames; cal boards on floor / table / ceiling + id 4): undistortion residual
+  0.74 / 0.70 px rms (L / R), flat over the image -> stock calibration stays (the boards-only refit is worse: 1.0-1.2 px);
+  stereo vs extrinsics 0.1-0.2 % of range; SteamVR pose error on 4-tag boards median 10-21 mm, p90 18-32 mm, ~1 deg,
+  no dependence on distance / speed (slow motion mostly); best camera<->pose delay -10 ms (flat minimum -> none).
+  Stage heights: floor board y = -0.06, table +0.68, ceiling +2.44 (floor -> ceiling 2.50 m).
+- Origin marker (150 mm) was seen mostly > 2.5 m from the stage origin and split in two clusters 40 cm apart: single
+  tag pose at range is too noisy; put it (or a 4-tag board) closer to the play area.
+- Anchored correction (--write-corrected, outlier-gated) validated by hold-out: correcting a board with the OTHER boards
+  only gave 20.6 -> 11.0 mm (floor board) but 14.5 -> 15.0 mm (table board) -> the SteamVR error is position dependent,
+  a global correction from far-away anchors does not transfer; only an anchor close to the scanned area helps.
+- Open3D 0.20 (wheel from ~/code/open3d) in its own venv ~/playground/.venv-o3d (numpy from the main venv via .pth;
+  stubs for plotly/dash, which only the unused visualization module imports). tools/postprocess.py: distance gate,
+  outlier removal, voxel, RANSAC plane labels (floor / ceiling / wall / furniture), Poisson mesh. Run with
+  .venv-o3d/bin/python. Tested on the old 967k-point scan_20261118_132057 (26 s at 3 cm voxels); needs a fresh
+  scan with `distance` + floor-referenced heights to judge the plane labels. CGAL not set up yet.
