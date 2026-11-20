@@ -105,6 +105,7 @@ var tag_layer: TagLayer                   # fiducial + QR labels (tools/tags.py)
 var tags_on := true
 var plane_layer: PlaneLayer             # coarse fitted planes, 10 % translucent (tools/planes.py)
 var planes_on := false
+var splat_on := false                   # capture-for-splatting (tools/splatcap.py), independent of the point-cloud scanning
 var plane_accum := 0.0
 var far_on := true                          # wide-baseline far-range depth (tools/farstereo.py)
 var tag_accum := 0.0
@@ -291,7 +292,7 @@ func _build_scene() -> void:
 		palette.add_button(TOOLS[i], TOOLS[i].to_upper(), i % 4, i / 4, "tool")
 	palette.add_button("undo", "UNDO", 0, 2)
 	palette.add_button("snap", "SNAP", 1, 2)
-	palette.add_button("rec", "● REC", 2, 2)
+	palette.add_button("rec", "● POINTS", 2, 2)
 	palette.add_button("still", "STILL", 3, 2)
 	palette.add_button("save", "SAVE", 0, 3)
 	palette.add_button("help", "HELP", 1, 3)
@@ -312,6 +313,7 @@ func _build_scene() -> void:
 	palette.add_button("tags", "TAGS", 0, 7)
 	palette.add_button("far", "FAR", 1, 7)
 	palette.add_button("planes", "PLANES", 2, 7)
+	palette.add_button("splat", "◉ SPLAT", 3, 7)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -605,6 +607,12 @@ func _on_palette(id: String) -> void:
 			_say("tag labels ON: QR text + fiducial axes / IDs" if tags_on else "tag labels off")
 			_write_ctl()
 			_sync_palette()
+		"splat":
+			splat_on = not splat_on
+			_buzz("left_hand", 0.5, 0.06)
+			_say("splat capture ON: storing full-resolution views for Gaussian splatting" if splat_on else "splat capture off")
+			_write_ctl()
+			_sync_palette()
 		"planes":
 			planes_on = not planes_on
 			plane_layer.visible = planes_on
@@ -645,7 +653,7 @@ func _sync_palette() -> void:
 	for t in TOOLS:
 		palette.set_active(t, t == tool)
 	palette.set_active("rec", scanning, Palette.COLS["rec"])
-	palette.set_text("rec", "● REC" if scanning else "■ STOPPED")
+	palette.set_text("rec", "● POINTS" if scanning else "○ POINTS")
 	palette.set_active("snap", snap)
 	palette.set_active("hide", not cloud_shown)
 	palette.set_text("hide", "SHOW CLOUD" if not cloud_shown else "HIDE CLOUD")
@@ -655,6 +663,7 @@ func _sync_palette() -> void:
 	palette.set_active("tags", tags_on)
 	palette.set_active("far", far_on)
 	palette.set_active("planes", planes_on)
+	palette.set_active("splat", splat_on, Palette.COLS["rec"])
 	palette.set_active("zone_show", zones_shown)
 	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
 	for id in ["sel_delete", "sel_keep", "sel_label"]:
@@ -667,7 +676,7 @@ func _sync_palette() -> void:
 	palette.set_text("zone_shape", zone_shape.to_upper())
 	palette.set_active("zone_mode", true, SceneModel.ZONE_COLS[zone_mode] * Color(0.6, 0.6, 0.6, 0.95) if zone_mode != "label" \
 		else SceneModel.ZONE_COLS[_label_name()] * Color(0.6, 0.6, 0.6, 0.95))
-	palette.set_title("%s   %s" % [tool.to_upper(), "● REC" if scanning else "■ STOPPED"])
+	palette.set_title("%s   %s" % [tool.to_upper(), "● POINTS" if scanning else "○ POINTS"])
 
 
 func _set_tool(t: String) -> void:
@@ -686,7 +695,7 @@ func _set_tool(t: String) -> void:
 func _toggle_scan() -> void:
 	scanning = not scanning
 	_buzz("left_hand", 0.5, 0.06)
-	_say("scan " + ("RECORDING" if scanning else "STOPPED"))
+	_say("point cloud scanning " + ("ON" if scanning else "OFF"))
 	_sync_palette()
 
 
@@ -978,7 +987,7 @@ func _write_ctl() -> void:
 			hands.append(m12)
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
 		"aim": aim, "hands": hands, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
-		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on, "planes": planes_on}
+		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on, "planes": planes_on, "splat": splat_on}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -1194,7 +1203,7 @@ func _hint() -> String:
 
 
 func _update_status() -> void:
-	status.text = "%s  %s%s   %.1f fr/s  %d fps  %dk pts%s" % ["● REC" if scanning else "■ STOP", tool.to_upper(),
+	status.text = "%s  %s%s   %.1f fr/s  %d fps  %dk pts%s" % ["● PTS" if scanning else "○ PTS", tool.to_upper(),
 		" ●" if painting else "", float(srv.get("fps", 0.0)), Engine.get_frames_per_second(), cloud.total_points / 1000,
 		"" if cloud.visible else "  (hidden)"]
 	# always-visible time + camera frame stamp, to find a moment of a composited capture in the recording
@@ -1204,6 +1213,8 @@ func _update_status() -> void:
 	status.text += "   %02d:%02d:%02d.%d  f%d" % [dt["hour"], dt["minute"], dt["second"], int(fmod(ut, 1.0) * 10), int(srv.get("frame", -1))]
 	if String(srv.get("origin", "")) != "":
 		status.text += "   " + String(srv["origin"])
+	if String(srv.get("splat", "")) != "":
+		status.text += "   " + String(srv["splat"])
 	if far_on and String(srv.get("far", "")) != "":
 		status.text += "   " + String(srv["far"])
 	if not gnss.is_empty():

@@ -35,6 +35,7 @@ from origin import OriginTracker
 from farstereo import FarStereo
 from tags import TagWatcher
 from planes import PlaneTracker
+from splatcap import SplatCapture
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--scale", type=float, default=0.35)
@@ -57,6 +58,9 @@ ap.add_argument("--sat", type=float, default=1.4, help="point colour saturation 
 ap.add_argument("--color-gamma", type=float, default=1.0, help="point colour mid-tone lift: <1 brightens (e.g. 0.7)")
 ap.add_argument("--no-planes", action="store_true", help="no live coarse plane fitting (tools/planes.py, viewer PLANES toggle)")
 ap.add_argument("--plane-hz", type=float, default=0.5, help="plane fitting rate (it extracts the whole fused cloud each time)")
+ap.add_argument("--no-splat", action="store_true", help="no capture-for-splatting mode (tools/splatcap.py, viewer SPLAT toggle)")
+ap.add_argument("--splat-min-dist", type=float, default=0.06, help="splat capture: a pair is stored when the view is this far (m, +0.5 m/rad of viewing angle) from all stored ones")
+ap.add_argument("--splat-gb", type=float, default=6.0, help="splat capture stops by itself at this size")
 ap.add_argument("--no-far", action="store_true", help="no wide-baseline far-range depth (tools/farstereo.py)")
 ap.add_argument("--far-mb", type=float, default=100.0, help="size of the on-disk keyframe ring buffer for the far-range depth (MB)")
 ap.add_argument("--far-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "scratch", "far"))
@@ -198,6 +202,8 @@ threading.Thread(target=occ_loop, daemon=True).start()
 origin = None if a.no_origin else OriginTracker(ls, path=f"{SHM}/pcorigin.json")
 far = None if a.no_far else FarStereo(ls, a.far_dir, max_bytes=a.far_mb * 1e6, z_min=a.far_zmin, blur_px=a.far_blur)
 if far: far.start()
+splatcap = None if a.no_splat else SplatCapture(root=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "splat"), min_dist=a.splat_min_dist, max_gb=a.splat_gb)
+if splatcap: splatcap.start()
 planes_state = {"on": False, "reset": False}
 plane_tr = None if a.no_planes else PlaneTracker(path=f"{SHM}/pcplanes.json")
 
@@ -240,7 +246,8 @@ def take_still():
 def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
                                  scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame,
-                                 origin=origin.hud() if origin else "", far=far.hud() if far else ""))
+                                 origin=origin.hud() if origin else "", far=far.hud() if far else "",
+                                 splat=splatcap.hud() if splatcap else "", splat_on=bool(splatcap and splatcap.enabled), splat_dir=(splatcap.dir or "") if splatcap else ""))
 
 
 last_fps = 0.0
@@ -286,6 +293,7 @@ try:
         fuse = not (scan == "off" or (scan == "paint" and not painting))
         tagwatch.enabled = bool(ctl and ctl.get("tags"))
         planes_state["on"] = bool(ctl and ctl.get("planes"))
+        if splatcap: splatcap.enabled = bool(ctl and ctl.get("splat")) and splatcap.bytes < splatcap.max_bytes
         if not fuse and not want_view and not tagwatch.enabled:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if zf.poll():                     # zones edited while not scanning: show the result right away

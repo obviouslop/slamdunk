@@ -769,3 +769,11 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
 - Real data (scan_20261120_194941): floor 5.4x9.8 m + ceiling found, no walls (they were barely scanned). The Nov 18 scan shows the
   floor as a stack of horizontal layers 0.9-2.3 m (pre-foveation-fix drift) - planes expose that drift nicely.
 - Not yet seen in the headset.
+
+## 2026-11-20: capture-for-splatting toggle
+- Toolbox: "● POINTS" (the old REC = point-cloud scanning/fusion) and "◉ SPLAT" (new, row 7) are independent: neither / points / splat / both.
+- tools/splatcap.py SplatCapture (thread in pcserver, own ArcShm reader, `ctl.splat`): writes full-res RAW10 stereo pairs + per-frame pose /
+  exposure to captures/splat/splat_<time>/ (liverec format -> `tools/export_colmap.py DIR OUT`). Online selection: sharp (>= 0.5 x running
+  median), synchronous pair, and a *new view* (no stored view within --splat-min-dist 0.06 m + 0.5 m/rad), max 3 pairs/s, stops by itself at
+  --splat-gb 6 (~15 MB/pair, ~400 pairs). The exporter's feature/dwell-weighted spatial decimation then picks the final subset. HUD shows
+  "splat: REC n views x GB". `--no-splat` disables. Disk writes are on the Frame's disk (not /tmp). Tested with replay; not in the headset.
