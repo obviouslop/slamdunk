@@ -105,7 +105,7 @@ var tag_layer: TagLayer                   # fiducial + QR labels (tools/tags.py)
 var tags_on := true
 var far_on := true                          # wide-baseline far-range depth (tools/farstereo.py)
 var tag_accum := 0.0
-var occlude := true                       # scene 90 % translucent where the real world (stereo depth) is closer
+var occlude := false                      # scene 90 % translucent where the real world (stereo depth) is closer
 var occ_shown := false
 var occ_ms := 0                           # last time an occlusion frame arrived
 const PAL_OFFSET := Vector3(0.0, 0.09, -0.03)   # in the left controller frame (y up, -z forward)

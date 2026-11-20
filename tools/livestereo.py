@@ -111,6 +111,19 @@ class LiveStereo:
             out.append(np.ascontiguousarray(np.clip(x, 0, 255).astype(np.uint8)[:, :, ::-1]))
         return out[0], out[1]
 
+    sat = 1.0       # colour finishing of the point colours (the passthrough image is tone mapped / saturated, raw linear data is not)
+    gamma = 1.0     # <1 brightens mid-tones (x -> x**gamma on 0..1)
+
+    def finish(self, x):
+        """white-balanced BGR float (0..255 scale) -> uint8 BGR with optional saturation boost and mid-tone lift."""
+        if self.sat != 1.0:
+            lum = x @ np.array([0.114, 0.587, 0.299], np.float32)
+            x = lum[..., None] + self.sat * (x - lum[..., None])
+        x = np.clip(x, 0, 255)
+        if self.gamma != 1.0:
+            x = 255.0 * (x / 255.0) ** self.gamma
+        return (x + 0.5).astype(np.uint8)
+
     def depth(self, rawL, rawR, far=None, half=False):
         """-> Z (rectified camL view, metres along the optical axis, 0 = invalid, valid up to `far`),
               RGB uint8 rectified colour, disp"""
@@ -123,7 +136,7 @@ class LiveStereo:
         # and force white where the sensor itself saturated
         x += np.maximum(x.max(-1, keepdims=True) - 255, 0)
         x[rc.max(-1) > 0.97 * (1023 - 64)] = 255
-        rgb = np.clip(x, 0, 255).astype(np.uint8)[:, :, ::-1]
+        rgb = self.finish(x)[:, :, ::-1]
         return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
 
     @staticmethod

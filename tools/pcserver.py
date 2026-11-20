@@ -52,6 +52,8 @@ ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker thr
 ap.add_argument("--underfloor-cm", type=float, default=7.0, help="drop points more than this far below a FLAT floor (mirror images of windows in glossy floors); 0 = off")
 ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-res occlusion depth frames")
 ap.add_argument("--conf", action="store_true", help="weight TSDF observations by per-pixel confidence (texture / depth-edge); A/B showed no gain on floor thickness, see re/test_conf.py")
+ap.add_argument("--sat", type=float, default=1.4, help="point colour saturation boost (1 = raw white-balanced sensor colours)")
+ap.add_argument("--color-gamma", type=float, default=1.0, help="point colour mid-tone lift: <1 brightens (e.g. 0.7)")
 ap.add_argument("--no-far", action="store_true", help="no wide-baseline far-range depth (tools/farstereo.py)")
 ap.add_argument("--far-mb", type=float, default=100.0, help="size of the on-disk keyframe ring buffer for the far-range depth (MB)")
 ap.add_argument("--far-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "scratch", "far"))
@@ -156,6 +158,7 @@ while True:   # wait for the frame source (arcgrab or replay_shm.py)
     try: s = ArcShm(); break
     except (FileNotFoundError, RuntimeError, ValueError): print("waiting for /dev/shm/arcgrab ...", flush=True); time.sleep(1)
 ls = LiveStereo(scale=a.scale, max_depth=a.maxdepth, min_depth=a.min_depth)
+ls.sat, ls.gamma = a.sat, a.color_gamma
 if a.origin_mm: fiducials.BOARDS["origin"]["tag_mm"] = a.origin_mm
 occ_state = {"on": False}
 

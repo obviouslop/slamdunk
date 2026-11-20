@@ -633,7 +633,7 @@ TODO: depth-correct own passthrough (user approved).
   scan with `distance` + floor-referenced heights to judge the plane labels. CGAL not set up yet.
 
 ## 2026-11-20 occlusion mask + hand exclusion
-- Occlusion (viewer, toolbox OCCLUDE, default on): the server publishes the stereo depth grid (pcpass.bin, colour reduced to 8x8
+- Occlusion (viewer, toolbox OCCLUDE, default OFF since 2026-11-20: depth-map noise made large areas flicker; the server publishes the stereo depth grid (pcpass.bin, colour reduced to 8x8
   unless DEPTH VIEW is on) whenever ctl.occlude is set; the cloud vertex shader (pc_points.gdshader occ_* uniforms) projects
   each point into that frame's camera and multiplies its visibility by 0.1 when the measured surface is > 8 cm closer. Cost: one
   texel fetch per point, grid is 107^2 (8 px blocks) -> speed over accuracy. Uses the exposure's own pose so head motion is
@@ -745,3 +745,14 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   tools/launch-session.sh [record] (starts the bridge if glasgow is installed, then pcsession.sh --gnss /dev/shm/gps-nmea) and
   tools/stop-session.sh back the .desktop files (~/.local/share/applications and ~/Desktop: Point Cloud Session, with "Start and record"/"Stop" actions; Point Cloud Stop).
   Logs: captures/logs/launcher.log, gps.log, glasgow.log. UNTESTED with the hardware (Glasgow's PTY log format unknown; fallback = pts diff).
+
+## 2026-11-20: indoor test feedback, cleanup
+- Occlusion (OCCLUDE) now defaults OFF: the per-frame low-res depth noise flipped large cloud areas between faded and visible
+  (flicker). A real fix would need temporal filtering of the depth grid (or hysteresis per point) in the vertex shader.
+- Fiducials/origin: detection is slow and the physical marker was off-centre and loosely attached, so it is not accurate enough to
+  anchor yet. `--apply-origin-corr` stays opt-in. Needs: a rigid, flat, centred board, and detection on the full-res image.
+- Point colours: pcserver `--sat` (default 1.4) and `--color-gamma` (default 1.0, <1 brightens) apply to the cloud colours
+  (LiveStereo.finish). Raw data is linear, grey-world white balanced; the runtime passthrough adds tone mapping / saturation we
+  do not replicate. Not verified in the headset: tune with e.g. `--sat 1.6 --color-gamma 0.7` (pcsession passes no extra args yet).
+- Removed unused: tools/fuse_live.py, fuse_recording.py, stereo_depth.py, poserefine.py, plyrender.py; 17 one-off re/ scripts;
+  src/rvrec*, rvstat, rvclock, bqdump, fmtprobe; stray notes.md; root data0.bin/layout0.bin dumps. (git history keeps them.)
