@@ -11,10 +11,10 @@ rm -f "$LINK"; GPID=""; trap '[ -n "$DPID" ] && { kill $DPID 2>/dev/null || sudo
 bridge() {   # bridge BAUD : (re)start the Glasgow UART->PTY bridge at this baud rate; sets $pty
   [ -n "$GPID" ] && { kill $GPID 2>/dev/null; wait $GPID 2>/dev/null; sleep 1; }
   local before; before=$(ls /dev/pts 2>/dev/null | sort); pty=""
-  "$GLASGOW" -v run uart -V 3.3 --rx A1 --tx A2 -b "$1" pty > "$LOG" 2>&1 & GPID=$!
+  "$GLASGOW" run uart -V 3.3 --rx A1 --tx A2 -b "$1" pty > "$LOG" 2>&1 & GPID=$!
   for _ in $(seq 1 150); do                                  # up to 30 s (FPGA bitstream load + applet start)
     kill -0 $GPID 2>/dev/null || { echo "glasgow exited:"; tail -20 "$LOG"; exit 1; }
-    pty=$(grep -o '/dev/pts/[0-9]\+' "$LOG" | tail -1)       # 1. glasgow logs the PTY path
+    pty=$(readlink /proc/$GPID/fd/* 2>/dev/null | grep -m1 '^/dev/pts/[0-9]\+$')   # 1. the PTY slave glasgow holds open (its log does not name it)
     if [ -z "$pty" ]; then                                   # 2. fallback: the newly appeared /dev/pts entry
       n=$(comm -13 <(echo "$before") <(ls /dev/pts | sort) | grep -x '[0-9]\+' | head -1); [ -n "$n" ] && pty=/dev/pts/$n
     fi
