@@ -631,3 +631,19 @@ TODO: depth-correct own passthrough (user approved).
   outlier removal, voxel, RANSAC plane labels (floor / ceiling / wall / furniture), Poisson mesh. Run with
   .venv-o3d/bin/python. Tested on the old 967k-point scan_20261118_132057 (26 s at 3 cm voxels); needs a fresh
   scan with `distance` + floor-referenced heights to judge the plane labels. CGAL not set up yet.
+
+## 2026-11-20 occlusion mask + hand exclusion
+- Occlusion (viewer, toolbox OCCLUDE, default on): the server publishes the stereo depth grid (pcpass.bin, colour reduced to 8x8
+  unless DEPTH VIEW is on) whenever ctl.occlude is set; the cloud vertex shader (pc_points.gdshader occ_* uniforms) projects
+  each point into that frame's camera and multiplies its visibility by 0.1 when the measured surface is > 8 cm closer. Cost: one
+  texel fetch per point, grid is 107^2 (8 px blocks) -> speed over accuracy. Uses the exposure's own pose so head motion is
+  compensated; the hand itself lags by the frame latency. Falls back to off when no frame arrived for 1 s. Only the cloud is
+  masked (placed objects / zones are not yet). Shader NOT yet tested on a GPU (headless tests cover the CPU mirror
+  DepthPassthrough.occludes and the uniform plumbing).
+- Hand exclusion (tools/handmask.py, pcserver default on, --no-handmask): the viewer now sends both controller poses in
+  pcctl.json ("hands"); per fused frame the controller position is projected into the rectified left image, the stereo depth
+  around it at the controller's distance seeds a depth-continuity flood fill (3 % per step in log depth), limited to a 25 cm
+  ball around the controller and dilated 4 px; those depths are zeroed before fusion (not for the passthrough / occlusion
+  frames, so hands still occlude). Checked visually on live16 (re/test_handmask.py -> captures/scratch/handmask): the
+  region covers controller + hand. Limitation: controller poses come from the viewer at 10-30 Hz, so fast hand motion
+  shifts the seed by a few cm (the 15 cm seed slack and the flood fill absorb this).

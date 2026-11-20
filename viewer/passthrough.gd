@@ -157,6 +157,31 @@ func apply_frame(hdr: PackedByteArray, body: PackedByteArray) -> bool:
 	return true
 
 
+func apply_occlusion(m: ShaderMaterial) -> void:
+	## Hand the newest depth grid to a material that has the occ_* uniforms (the cloud shader).
+	m.set_shader_parameter("occ_depth", depth_tex)
+	m.set_shader_parameter("occ_rect_from_stage", Projection(Transform3D(mat.get_shader_parameter("stage_from_rect")).affine_inverse()))
+	m.set_shader_parameter("occ_intr", mat.get_shader_parameter("intr"))
+	m.set_shader_parameter("occ_block", mat.get_shader_parameter("block"))
+
+
+func occludes(p: Vector3, margin := 0.08) -> bool:
+	## CPU copy of the cloud shader's test: is the measured real surface in front of STAGE point p (towards the camera)?
+	if depth_img == null:
+		return false
+	var intr: Vector4 = mat.get_shader_parameter("intr")
+	var blk: float = mat.get_shader_parameter("block")
+	var pr := Transform3D(mat.get_shader_parameter("stage_from_rect")).affine_inverse() * p
+	if pr.z < 0.1:
+		return false
+	var g := Vector2(intr.x * pr.x / pr.z + intr.y, intr.x * pr.y / pr.z + intr.z) / blk
+	var gi := Vector2i(int(floor(g.x)), int(floor(g.y)))
+	if gi.x < 0 or gi.y < 0 or gi.x >= grid.x or gi.y >= grid.y:
+		return false
+	var z := depth_img.get_pixel(gi.x, gi.y).r
+	return z > 0.0 and z < pr.z - margin
+
+
 func cell_point(i: int, j: int) -> Variant:
 	## CPU copy of the vertex shader (tests / picking): STAGE position of grid cell (row i, col j), null if invalid.
 	if depth_img == null:

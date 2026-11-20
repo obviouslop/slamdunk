@@ -113,7 +113,7 @@ func _late_a() -> void:
 func _late_b() -> void:
 	check(inst.get("tool") == "scan", "pc_main instantiated")
 	var ip: Palette = inst.get("palette")
-	check(ip.buttons.size() == 29, "toolbox has %d buttons" % ip.buttons.size())
+	check(ip.buttons.size() == 30, "toolbox has %d buttons" % ip.buttons.size())
 	inst.call("_on_palette", "measure")
 	check(inst.get("tool") == "measure", "toolbox selects tool")
 	var nobj: int = inst.get("model").objects.size()
@@ -159,6 +159,13 @@ func _late_b() -> void:
 	check(cp != null and (cp as Vector3).is_equal_approx(Vector3(1.6, 1.0, -2.2)), "passthrough cell unprojection %s" % [cp])
 	check(dp.cell_point(0, 0) == null, "cell without depth is invalid")
 	check(dp.mesh != null and dp.mesh.get_surface_count() == 1, "passthrough grid mesh built")
+	var cam := Transform3D(dp.mat.get_shader_parameter("stage_from_rect")).origin
+	var pp: Vector3 = cp
+	check(dp.occludes(cam + (pp - cam) * 1.3) and not dp.occludes(cam + (pp - cam) * 0.7), "occlusion: points behind the measured surface fade, in front stay")
+	var om := ShaderMaterial.new()
+	om.shader = load("res://pc_points.gdshader")
+	dp.apply_occlusion(om)
+	check(om.get_shader_parameter("occ_depth") == dp.depth_tex and float(om.get_shader_parameter("occ_block")) == float(dp.mat.get_shader_parameter("block")), "occlusion uniforms handed to the cloud shader")
 	inst.call("_on_palette", "pass")
 	check(not dp.visible, "DEPTH VIEW off")
 	# SELECT: per-tool buttons, brush selection -> exclusion zone, undo; zone file for the server

@@ -28,6 +28,7 @@ import ptpub
 import zones as zonemod
 import pcpub
 import stills
+import handmask
 import fiducials
 from origin import OriginTracker
 
@@ -45,6 +46,7 @@ ap.add_argument("--publish-every", type=float, default=1.0)
 ap.add_argument("--tile", type=float, default=1.0, help="tile size (m) of the published cloud")
 ap.add_argument("--max-pub", type=int, default=300000)
 ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker threads (leave cores for XR)")
+ap.add_argument("--no-handmask", action="store_true", help="do not keep hands / controllers out of the fused cloud")
 ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
 ap.add_argument("--origin-mm", type=float, help="printed edge of the origin marker in mm (default fiducials.ORIGIN_MM)")
 ap.add_argument("--origin-frame", action="store_true", help="save PLYs in the origin-marker frame (x right, y up, z out of the paper) "
@@ -195,7 +197,8 @@ try:
         if ctl:
             handle_cmd(ctl)
         painting = bool(ctl and ctl.get("painting") and len(ctl.get("aim") or []) == 12)
-        want_pt = a.passthrough or bool(ctl and ctl.get("passthrough"))
+        want_view = a.passthrough or bool(ctl and ctl.get("passthrough"))          # viewer shows the camera image (needs colour)
+        want_pt = want_view or bool(ctl and ctl.get("occlude"))                    # depth grid for the occlusion mask / depth view
         fuse = not (scan == "off" or (scan == "paint" and not painting))
         if not fuse and not want_pt:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
@@ -225,10 +228,14 @@ try:
         if origin and n_frames % 2 == 0: origin.submit(cL, mL["pose"])
         if want_pt:                                     # depth-correct passthrough (STAGE frame, raw tracking pose)
             n_pt += 1
-            ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt))
+            ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt, colour_size=432 if want_view else 8))
         if not fuse:
             continue
         t2 = time.monotonic()
+        if not a.no_handmask and ctl and ctl.get("hands"):        # controllers + the hands holding them stay out of the map
+            hp = [(h[3], h[7], h[11]) for h in ctl["hands"] if len(h) == 12]
+            hm = handmask.hand_mask(Z, np.linalg.inv(Tt), ls.f, ls.P1[0, 2], ls.P1[1, 2], hp)
+            if hm.any(): Z = Z.copy(); Z[hm] = 0
         with lock:
             mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
             ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"])

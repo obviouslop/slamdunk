@@ -100,6 +100,9 @@ var ret_mat: StandardMaterial3D
 var palette: Palette
 var pal_holder: Node3D
 var passthrough: DepthPassthrough
+var occlude := true                       # scene 90 % translucent where the real world (stereo depth) is closer
+var occ_shown := false
+var occ_ms := 0                           # last time an occlusion frame arrived
 const PAL_OFFSET := Vector3(0.0, 0.09, -0.03)   # in the left controller frame (y up, -z forward)
 const PAL_TILT_DEG := 25.0                         # face tilted up toward the eyes
 var ctrl := {}
@@ -285,7 +288,8 @@ func _build_scene() -> void:
 	palette.add_button("zone_show", "ZONES ON", 3, 4)
 	palette.add_button("clear_cloud", "CLEAR CLOUD", 0, 5, "danger")
 	palette.add_button("clear_objects", "CLEAR OBJ.", 1, 5, "danger")
-	palette.add_button("exit", "EXIT", 2, 5, "danger", 2)
+	palette.add_button("occlude", "OCCLUDE", 2, 5)
+	palette.add_button("exit", "EXIT", 3, 5, "danger")
 	# per-tool row (SELECT / ZONE)
 	palette.add_button("sel_delete", "DELETE", 0, 6)
 	palette.add_button("sel_keep", "KEEP ONLY", 1, 6)
@@ -570,6 +574,11 @@ func _on_palette(id: String) -> void:
 			_say("objects cleared")
 		"pass":
 			_toggle_passthrough()
+		"occlude":
+			occlude = not occlude
+			_say("occlusion ON: the cloud fades where real objects are closer" if occlude else "occlusion off")
+			_write_ctl()
+			_sync_palette()
 		"sel_delete":
 			_apply_selection("exclude")
 		"sel_keep":
@@ -605,6 +614,7 @@ func _sync_palette() -> void:
 	palette.set_text("hide", "SHOW CLOUD" if not cloud_shown else "HIDE CLOUD")
 	palette.set_active("help", help.visible)
 	palette.set_active("pass", passthrough.visible)
+	palette.set_active("occlude", occlude)
 	palette.set_active("zone_show", zones_shown)
 	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
 	for id in ["sel_delete", "sel_keep", "sel_label"]:
@@ -917,9 +927,18 @@ func _write_ctl() -> void:
 		var t := c.global_transform        # XROrigin at identity -> STAGE space
 		for r in range(3):
 			aim.append_array([t.basis.x[r], t.basis.y[r], t.basis.z[r], t.origin[r]])
+	var hands := []                         # both controllers (STAGE 3x4): the server keeps them and the hands out of the map
+	for hn in ["left_hand", "right_hand"]:
+		var hc: XRController3D = ctrl.get(hn)
+		if hc != null and hc.get_has_tracking_data():
+			var ht := hc.global_transform
+			var m12 := []
+			for r in range(3):
+				m12.append_array([ht.basis.x[r], ht.basis.y[r], ht.basis.z[r], ht.origin[r]])
+			hands.append(m12)
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
-		"aim": aim, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
-		"passthrough": passthrough != null and passthrough.visible}
+		"aim": aim, "hands": hands, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
+		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -987,8 +1006,14 @@ func _toggle_passthrough() -> void:
 
 
 func _process(delta: float) -> void:
-	if passthrough.visible:
-		passthrough.poll()
+	if passthrough.visible or occlude:
+		if passthrough.poll():
+			occ_ms = Time.get_ticks_msec()
+			passthrough.apply_occlusion(mat)
+	var occ_live := occlude and Time.get_ticks_msec() - occ_ms < 1000
+	if occ_live != occ_shown:
+		occ_shown = occ_live
+		mat.set_shader_parameter("occ_on", 1.0 if occ_live else 0.0)
 	ctl_accum += delta
 	if ctl_accum >= CTL_S:
 		ctl_accum = 0.0
