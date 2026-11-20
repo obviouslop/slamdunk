@@ -5,24 +5,33 @@
 cd "$(dirname "$0")"
 GLASGOW=${GLASGOW:-$HOME/.local/bin/glasgow}
 LINK=/dev/shm/gps-nmea; LOG=captures/logs/glasgow.log; mkdir -p captures/logs
-before=$(ls /dev/pts 2>/dev/null | sort)
-"$GLASGOW" -v run uart -V 3.3 --rx A1 --tx A2 -b 38400 pty > "$LOG" 2>&1 & GPID=$!
-DPID=""
-trap '[ -n "$DPID" ] && { kill $DPID 2>/dev/null || sudo -n kill $DPID 2>/dev/null; }; kill $GPID 2>/dev/null; rm -f "$LINK"' EXIT INT TERM
-pty=""
-for _ in $(seq 1 150); do                                  # up to 30 s (FPGA bitstream load + applet start)
-  kill -0 $GPID 2>/dev/null || { echo "glasgow exited:"; tail -20 "$LOG"; exit 1; }
-  pty=$(grep -o '/dev/pts/[0-9]\+' "$LOG" | tail -1)       # 1. glasgow logs the PTY path
-  if [ -z "$pty" ]; then                                   # 2. fallback: the newly appeared /dev/pts entry
-    n=$(comm -13 <(echo "$before") <(ls /dev/pts | sort) | grep -x '[0-9]\+' | head -1); [ -n "$n" ] && pty=/dev/pts/$n
-  fi
-  [ -n "$pty" ] && break; sleep 0.2
-done
-[ -n "$pty" ] || { echo "no PTY found, see $LOG"; exit 1; }
-ln -sf "$pty" "$LINK"; echo "GNSS PTY: $pty  (symlink $LINK)"
-# u-blox M10: 10 Hz + only the sentences we use (set GPS_HZ=1 to skip the faster rate); failure is not fatal
-timeout 20 /home/steamos/playground/.venv/bin/python -I tools/gnss_config.py "$pty" --hz "${GPS_HZ:-10}" > captures/logs/gnss_config.log 2>&1 \
-  && echo "receiver set to ${GPS_HZ:-10} Hz" || { echo "receiver config incomplete, see captures/logs/gnss_config.log"; cat captures/logs/gnss_config.log; }
+LOG_CFG=captures/logs/gnss_config.log; BAUD=${GPS_BAUD:-57600}; PY=/home/steamos/playground/.venv/bin/python
+rm -f "$LINK"; GPID=""; trap '[ -n "$DPID" ] && { kill $DPID 2>/dev/null || sudo -n kill $DPID 2>/dev/null; }; [ -n "$GPID" ] && kill $GPID 2>/dev/null; rm -f "$LINK"' EXIT INT TERM
+bridge() {   # bridge BAUD : (re)start the Glasgow UART->PTY bridge at this baud rate; sets $pty
+  [ -n "$GPID" ] && { kill $GPID 2>/dev/null; wait $GPID 2>/dev/null; sleep 1; }
+  local before; before=$(ls /dev/pts 2>/dev/null | sort); pty=""
+  "$GLASGOW" -v run uart -V 3.3 --rx A1 --tx A2 -b "$1" pty > "$LOG" 2>&1 & GPID=$!
+  for _ in $(seq 1 150); do                                  # up to 30 s (FPGA bitstream load + applet start)
+    kill -0 $GPID 2>/dev/null || { echo "glasgow exited:"; tail -20 "$LOG"; exit 1; }
+    pty=$(grep -o '/dev/pts/[0-9]\+' "$LOG" | tail -1)       # 1. glasgow logs the PTY path
+    if [ -z "$pty" ]; then                                   # 2. fallback: the newly appeared /dev/pts entry
+      n=$(comm -13 <(echo "$before") <(ls /dev/pts | sort) | grep -x '[0-9]\+' | head -1); [ -n "$n" ] && pty=/dev/pts/$n
+    fi
+    [ -n "$pty" ] && break; sleep 0.2
+  done
+  [ -n "$pty" ] || { echo "no PTY found, see $LOG"; exit 1; }
+}
+cfg() { timeout 30 $PY -I tools/gnss_config.py "$pty" --hz "${GPS_HZ:-10}" "$@" >> "$LOG_CFG" 2>&1; }
+: > "$LOG_CFG"
+# The receiver keeps its RAM settings while powered, so try the target baud first; otherwise configure at the default 38400
+# (rate, sentences, then the UART baud switch last) and reopen the bridge at the new rate.
+bridge "$BAUD"
+cfg --baud "$BAUD"; rc=$?
+if [ $rc = 2 ]; then
+  echo "receiver not at $BAUD baud, configuring at 38400"; bridge 38400; cfg --baud "$BAUD"; rc=$?; sleep 0.5; bridge "$BAUD"
+fi
+[ $rc = 0 ] && echo "receiver: ${GPS_HZ:-10} Hz at $BAUD baud" || { echo "receiver config incomplete (rc=$rc), see $LOG_CFG"; cat "$LOG_CFG"; }
+ln -sf "$pty" "$LINK"; echo "GNSS PTY: $pty  (symlink $LINK)"     # only now: gnssd must not open a PTY that is about to be recreated
 if [ "${1:-}" = --gpsd ]; then
   # gpsd needs no root for a PTY we own; fall back to passwordless sudo (sudoers: steamos ALL=(root) NOPASSWD: /usr/bin/gpsd).
   # It runs in the background so the trap above stops it together with glasgow.

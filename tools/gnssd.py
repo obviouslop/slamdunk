@@ -238,6 +238,8 @@ def main():
     os.makedirs(os.path.join(ROOT, "captures", "gnss"), exist_ok=True)
     log = open(os.path.join(ROOT, "captures", "gnss", time.strftime("gnss_%Y%m%d_%H%M%S.log")), "a")
     ser = open_serial(a.port, a.baud)
+    fixlog = open(log.name.replace(".log", ".fixes.jsonl"), "a")        # 1 Hz debug log: wall time, monotonic time, last fix, georef state
+    print(f"gnssd: logging to {log.name} (+ .fixes.jsonl)", flush=True)
     buf = b""; last_solve = 0; last = None
     print(f"gnssd: reading {a.port}, lever {a.lever}", flush=True)
     while True:
@@ -263,6 +265,11 @@ def main():
         if time.monotonic() - last_solve > 1.0:
             last_solve = time.monotonic(); log.flush()
             r = gr.solve(poses); write_json("/dev/shm/georef.json", r)
+            try:
+                fx = dict(last[1]) if last else {}
+                fixlog.write(json.dumps(dict(t_wall=round(time.time(), 3), t_mono=round(time.monotonic(), 3), fix=fx, georef={k: v for k, v in r.items() if not isinstance(v, (list, dict))}), default=float) + "\n"); fixlog.flush()
+            except Exception as e:
+                print("fixlog:", e, flush=True)
 
 
 if __name__ == "__main__":
