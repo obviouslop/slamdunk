@@ -68,7 +68,7 @@ else
   src/arcgrab --seconds "$((SECONDS_RUN + 10))" --max-exp 3000 "${POSELOG[@]}" 2> "$LOG/arcgrab.log" & PIDS+=($!)
 fi
 sleep 3
-nice -n 8 $PY -I tools/pcserver.py --scale "$SCALE" $PCSERVER_ARGS > "$LOG/pcserver.log" 2>&1 & PIDS+=($!)
+nice -n 8 $PY -I tools/pcserver.py --scale "$SCALE" ${PCSERVER_ARGS:-} > "$LOG/pcserver.log" 2>&1 & PIDS+=($!)
 if [ -n "$GNSS" ]; then
   $PY -I tools/gnssd.py --port "$GNSS" > "$LOG/gnssd.log" 2>&1 & PIDS+=($!)
 fi
