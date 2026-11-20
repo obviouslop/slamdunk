@@ -20,6 +20,9 @@ for _ in $(seq 1 150); do                                  # up to 30 s (FPGA bi
 done
 [ -n "$pty" ] || { echo "no PTY found, see $LOG"; exit 1; }
 ln -sf "$pty" "$LINK"; echo "GNSS PTY: $pty  (symlink $LINK)"
+# u-blox M10: 10 Hz + only the sentences we use (set GPS_HZ=1 to skip the faster rate); failure is not fatal
+timeout 20 /home/steamos/playground/.venv/bin/python -I tools/gnss_config.py "$pty" --hz "${GPS_HZ:-10}" > captures/logs/gnss_config.log 2>&1 \
+  && echo "receiver set to ${GPS_HZ:-10} Hz" || { echo "receiver config incomplete, see captures/logs/gnss_config.log"; cat captures/logs/gnss_config.log; }
 if [ "${1:-}" = --gpsd ]; then
   # gpsd needs no root for a PTY we own; fall back to passwordless sudo (sudoers: steamos ALL=(root) NOPASSWD: /usr/bin/gpsd).
   # It runs in the background so the trap above stops it together with glasgow.
