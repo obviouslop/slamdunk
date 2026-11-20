@@ -76,11 +76,15 @@ def undist(cam):
 
 
 # ------------------------------------------------------------------ 1. detection pass
-rows = []                       # one per (frame, camera, board group)
+import pickle
 corners_log = []                # per corner residuals
 cache = os.path.join(out, "detections.npz")
+rows = []                       # one per (frame, camera, board group)
 t_start = __import__("time").time()
 sel = [r for r in recs if r["left"]["pose_valid"]][::a.every]
+cache_fn = os.path.join(out, f"detections_{a.cams}_e{a.every}.pkl")
+if os.path.exists(cache_fn):
+    rows = pickle.load(open(cache_fn, "rb")); sel = []; print(f"loaded {len(rows)} cached detections ({cache_fn})")
 for n, r in enumerate(sel):
     i = r["i"]
     for cam in a.cams:
@@ -99,6 +103,7 @@ for n, r in enumerate(sel):
                              amb=(cands[1][1] / max(cands[0][1], 1e-12)) if len(cands) > 1 else np.inf,
                              obj=obj, px=np.concatenate([d["corners"] for d in grp]), xn=xn, r=r))
     print(f"\r{n + 1}/{len(sel)} frames, {len(rows)} board detections", end="", flush=True)
+if sel: pickle.dump(rows, open(cache_fn, "wb"))
 print(f"\n{len(rows)} board detections in {__import__('time').time() - t_start:.0f} s")
 if not rows: sys.exit("no markers found")
 
@@ -123,7 +128,7 @@ names = {k: f"{b}#{k}@({c[0]:+.2f},{c[1]:+.2f},{c[2]:+.2f})" for k, (b, c, n) in
 print("physical boards:", ", ".join(f"{names[k]} n={inst[k][2]}" for k in names))
 
 
-def reliable(row): return row["ntag"] >= 2 or (row["amb"] > 1.6 and row["cands"][0][1] * KL[0, 0] < 0.6)   # single tag: unambiguous and well-refined
+def reliable(row): return row["ntag"] >= 2 or (row["amb"] > 1.6 and row["cands"][0][1] * KL[0, 0] < 0.6 and np.linalg.norm(row["cands"][0][0][:3, 3]) < 2.5)   # single tag: unambiguous and well-refined
 
 
 # reference pose of each board = robust mean of its reliable detections; then resolve single-tag flips with it
@@ -223,7 +228,7 @@ lines = ["cam,theta_deg,u,v,res_radial_px,res_tangential_px,dist_m,angle_deg"]
 for cam, K, D in (("L", KL, DL), ("R", KR, DR)):
     res = []
     for r in rows:
-        if r["cam"] != cam or r["ntag"] < 2 and r["amb"] < 3: continue
+        if r["cam"] != cam or r["ntag"] < 2 and r["amb"] < 3 or r["rms"] * K[0, 0] > 2.0: continue
         T = r["T_cam_board"]; P = (T[:3, :3] @ r["obj"].T + T[:3, 3:4]).T
         proj, _ = cv2.fisheye.projectPoints(P.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, D)
         e = r["px"] - proj.reshape(-1, 2)                                        # detected - model-projected (distorted image px)
@@ -244,12 +249,16 @@ open(os.path.join(out, "corners.csv"), "w").write("\n".join(lines) + "\n")
 if a.refit:
     cal = {}
     for cam, K, D in (("L", KL, DL), ("R", KR, DR)):
-        V = [r for r in rows if r["cam"] == cam and r["ntag"] >= 2]
+        V = [r for r in rows if r["cam"] == cam and r["ntag"] >= 2 and r["rms"] * K[0, 0] < 2.0]
         if len(V) < 15: print(f"refit cam{cam}: only {len(V)} multi-tag views (need >= 15, from varied angles)"); continue
         objp = [r["obj"].reshape(-1, 1, 3).astype(np.float64) for r in V]; imgp = [r["px"].reshape(-1, 1, 2).astype(np.float64) for r in V]
         K2, D2 = K.copy(), D.copy().reshape(4, 1)
-        rms, K2, D2, _, _ = cv2.fisheye.calibrate(objp, imgp, (2464, 2464), K2, D2, flags=cv2.fisheye.CALIB_USE_INTRINSIC_GUESS | cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
-                                                  | cv2.fisheye.CALIB_FIX_SKEW, criteria=(cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-9))
+        try:
+            rms, K2, D2, _, _ = cv2.fisheye.calibrate(objp, imgp, (2464, 2464), K2, D2, flags=cv2.fisheye.CALIB_USE_INTRINSIC_GUESS
+                                                      | cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW | cv2.fisheye.CALIB_FIX_K3
+                                                      | cv2.fisheye.CALIB_FIX_K4, criteria=(cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-9))
+        except cv2.error as e:
+            print(f"refit cam{cam}: failed ({str(e).splitlines()[0][:80]})"); continue
         cal[cam] = dict(rms_px=float(rms), K=K2.tolist(), D=D2.ravel().tolist(), K_old=K.tolist(), D_old=D.ravel().tolist(), views=len(V))
         print(f"refit cam{cam}: {len(V)} views, rms {rms:.3f} px; f {K[0, 0]:.1f}->{K2[0, 0]:.1f}, c ({K[0, 2]:.1f},{K[1, 2]:.1f})->({K2[0, 2]:.1f},{K2[1, 2]:.1f}), "
               f"D {np.round(D.ravel(), 4).tolist()} -> {np.round(D2.ravel(), 4).tolist()}")
@@ -264,7 +273,19 @@ if a.write_corrected:
         Wc = pose_row(row)
         Corr = ref[row["inst"]] @ np.linalg.inv(row["T_cam_board"]) @ np.linalg.inv(Wc)
         C.setdefault(row["i"], []).append((Corr, (row["edge"] ** 2) * (4 if row["ntag"] > 1 else 1)))
-    idx = np.array(sorted(C)); Cf = {i: F.mean_pose([c for c, w in C[i]], [w for c, w in C[i]]) for i in idx}
+    # per frame: robust combination of the anchors (a single bad detection must not win), then a temporal outlier gate
+    def combine(lst):
+        P = np.array([c[:3, 3] for c, w in lst]); med = np.median(P, 0)
+        ok = [(c, w) for (c, w), p in zip(lst, P) if np.linalg.norm(p - med) < 0.03] or lst
+        return F.mean_pose([c for c, w in ok], [w for c, w in ok])
+    idx = np.array(sorted(C)); Cf = {i: combine(C[i]) for i in idx}
+    tt0 = np.array([{r["i"]: r["left"]["ts"] for r in recs}[i] for i in idx]); nrej = 0; Cf0 = dict(Cf)
+    for k, i in enumerate(idx):
+        nb = [Cf0[j] for j in idx[np.abs(tt0 - tt0[k]) < 3.0] if j != i]
+        if len(nb) >= 3:
+            m = np.median([c[:3, 3] for c in nb], 0)
+            if np.linalg.norm(Cf[i][:3, 3] - m) > 0.04: Cf[i] = None; nrej += 1
+    idx = np.array([i for i in idx if Cf[i] is not None]); print(f"    rejected {nrej} outlier corrections")
     ts_of = {r["i"]: r["left"]["ts"] for r in recs}
     tt = np.array([ts_of[i] for i in idx])
     fn = os.path.join(a.rec, "frames_fid.jsonl"); nfix = 0
@@ -281,4 +302,21 @@ if a.write_corrected:
     cs = np.array([F.pose_diff(np.eye(4), Cf[i]) for i in idx], dtype=object)
     mag = np.array([np.linalg.norm(x[0]) for x in cs]); ang = np.array([x[1] for x in cs])
     print(f"    correction applied: translation median {np.median(mag) * 1000:.1f} mm, max {mag.max() * 1000:.0f} mm; rotation median {np.median(ang):.2f} deg, max {ang.max():.2f}")
+    # hold-out validation: correct each board's detections using ONLY the other boards, compare its stage-pose deviation
+    print("\n    hold-out check (board deviation before -> after correcting it with the OTHER boards only):")
+    for k in use:
+        Ro = [r for r in rows if r["inst"] != k and r["inst"] in use and reliable(r)]
+        Rk = [r for r in rows if r["inst"] == k and reliable(r)]
+        if len(Rk) < 5 or len(Ro) < 5: continue
+        Co = {}
+        for r in Ro:
+            Co.setdefault(r["i"], []).append((ref[r["inst"]] @ np.linalg.inv(r["T_cam_board"]) @ np.linalg.inv(pose_row(r)), r["edge"] ** 2))
+        io = np.array(sorted(Co)); to = np.array([ts_of[i] for i in io]); before, after = [], []
+        for r in Rk:
+            near = io[np.abs(to - ts_of[r["i"]]) < 1.0]
+            if not len(near): continue
+            Cs = F.mean_pose([combine(Co[i]) for i in near]); Tb = Cs @ r["Tsb"]
+            before.append(np.linalg.norm(ref[k][:3, :3] @ F.pose_diff(ref[k], r["Tsb"])[0])); after.append(np.linalg.norm(ref[k][:3, :3] @ F.pose_diff(ref[k], Tb)[0]))
+        if len(after) >= 5:
+            print(f"      {names[k]}: n={len(after)}  median {np.median(before) * 1000:.1f} -> {np.median(after) * 1000:.1f} mm   p90 {np.percentile(before, 90) * 1000:.1f} -> {np.percentile(after, 90) * 1000:.1f} mm")
 print(f"\nCSV: {out}/pose_error.csv, corners.csv")
