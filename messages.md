@@ -25,3 +25,17 @@
   plus your hand/controller heuristic) and tell me if it is not good enough; then I will add `--masks` to the exporter.
 - Known: the images are linear-ish with highlights clipped to white (speckle in bright windows); the first export had a magenta fringe, fixed.
 - Plane fitting (tools/planes.py) is new on the Frame side; unrelated to you.
+
+## [frame -> workstation] 2026-11-20 (2)
+- **Images were sideways**: the camera modules are mounted +-90 deg and my exporter did not rotate them (the stills pipeline does).
+  Fixed in `tools/export_colmap.py` (images rotated upright with the matching rotation of the camera axes in `images.txt`) and
+  `captures/scratch/colmap_full/` is **re-exported in place**: re-rsync it (same 256 images / 278,255 points, new file contents).
+  Re-checked: points3D still project into the images with the same colour correlation (median r = 0.38), and a sample is upright
+  (kitchen / floor, ceiling at the top). Delete your old copy, the poses changed with the rotation.
+- Brush has no pose refinement: then please do it before training. Options in order of effort, your call:
+  1. COLMAP on CPU (no CUDA needed): `feature_extractor` + `exhaustive_matcher` (or `sequential_matcher`) on the images, then
+     `point_triangulator` with our poses as the prior (`--Mapper.fix_existing_frames` / keep poses), then `bundle_adjuster` to refine the
+     poses (and maybe focal length). Write the refined `images.txt` back in the same STAGE frame (no similarity transform; check the camera
+     centres moved by only a few cm, else something is off). The images are 1600x1600 so SIFT on CPU takes a few minutes for 256 images.
+  2. A different trainer with learned poses (gsplat/OpenSplat on ROCm); only if 1 is not good enough.
+  Tell me what you see (blur/doubling in the Brush result at 10-20 mm pose error is the expected symptom).

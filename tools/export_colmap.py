@@ -18,6 +18,7 @@ import argparse, json, os, sys
 import numpy as np, cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from livestereo import LiveStereo, unpack_raw
+from stills import upright
 
 ap = argparse.ArgumentParser()
 ap.add_argument("rec"); ap.add_argument("out")
@@ -28,6 +29,7 @@ ap.add_argument("--cams", default="left,right"); ap.add_argument("--max-points",
 a = ap.parse_args()
 
 ls = LiveStereo(scale=0.5)
+UP = {}          # per camera: (cv2 rotate code or None, R_old_from_new). The sensors are mounted +-90 deg: rotate the images upright.
 KB = {"left": (ls.KL, ls.DL), "right": (ls.KR, ls.DR)}
 
 
@@ -43,7 +45,10 @@ def cam_pose(side, m):
     if side == "right":
         C = np.eye(4); C[:3, :3] = ls.R.T; C[:3, 3] = -ls.R.T @ ls.t      # camL_from_camR
         T = T @ C
-    return T
+    if side not in UP:
+        code, Rn, _ = upright(ls, side); UP[side] = (code, Rn)
+    U = np.eye(4); U[:3, :3] = UP[side][1]
+    return T @ U                                                           # pose of the upright (rotated) image
 
 
 def rot_deg(Ra, Rb):
@@ -137,6 +142,7 @@ with open(os.path.join(sp, "images.txt"), "w") as fi:
         x = np.clip(x, 0, 1)
         x = np.where(x <= 0.0031308, 12.92 * x, 1.055 * x ** (1 / 2.4) - 0.055)
         im = cv2.remap((x * 255).astype(np.uint8), *maps[s], cv2.INTER_LINEAR)
+        if UP[s][0] is not None: im = cv2.rotate(im, UP[s][0])
         name = f"{s}_{i:05d}.jpg"; cv2.imwrite(os.path.join(img_dir, name), im, [cv2.IMWRITE_JPEG_QUALITY, 95])
         Tc = np.linalg.inv(T)                                   # world-to-camera
         q = qvec(Tc[:3, :3]); t = Tc[:3, 3]
