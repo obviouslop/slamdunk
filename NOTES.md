@@ -753,6 +753,6 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   anchor yet. `--apply-origin-corr` stays opt-in. Needs: a rigid, flat, centred board, and detection on the full-res image.
 - Point colours: pcserver `--sat` (default 1.4) and `--color-gamma` (default 1.0, <1 brightens) apply to the cloud colours
   (LiveStereo.finish). Raw data is linear, grey-world white balanced; the runtime passthrough adds tone mapping / saturation we
-  do not replicate. Not verified in the headset: tune with e.g. `--sat 1.6 --color-gamma 0.7` (pcsession passes no extra args yet).
+  do not replicate. Not verified in the headset: tune with e.g. `--sat 1.6 --color-gamma 0.7` (`PCSERVER_ARGS="--sat 1.6" tools/pcsession.sh`).
 - Removed unused: tools/fuse_live.py, fuse_recording.py, stereo_depth.py, poserefine.py, plyrender.py; 17 one-off re/ scripts;
   src/rvrec*, rvstat, rvclock, bqdump, fmtprobe; stray notes.md; root data0.bin/layout0.bin dumps. (git history keeps them.)
