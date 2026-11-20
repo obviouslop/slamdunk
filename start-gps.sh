@@ -29,7 +29,11 @@ cfg() { timeout 30 $PY -I tools/gnss_config.py "$pty" --hz "${GPS_HZ:-10}" ${GPS
 bridge "$BAUD"
 cfg --baud "$BAUD"; rc=$?
 if [ $rc = 2 ]; then
-  echo "receiver not at $BAUD baud, configuring at 38400"; bridge 38400; cfg --baud "$BAUD"; rc=$?; sleep 0.5; [ $rc = 0 ] && bridge "$BAUD"      # only switch the bridge if the receiver took the new baud rate
+  echo "receiver not at $BAUD baud, configuring at 38400"; bridge 38400; cfg --baud "$BAUD"; rc=$?; sleep 0.5
+  if [ $rc = 0 ]; then                                   # the receiver switched baud rate: reopen the bridge and verify by talking to it
+    bridge "$BAUD"; cfg; rc=$?
+    [ $rc = 0 ] || { echo "no answer at $BAUD after the switch; going back to 38400"; bridge 38400; cfg --baud 38400; bridge 38400; rc=1; }
+  fi
 fi
 [ $rc = 0 ] && echo "receiver: ${GPS_HZ:-10} Hz at $BAUD baud" || { echo "receiver config incomplete (rc=$rc), see $LOG_CFG"; cat "$LOG_CFG"; }
 ln -sf "$pty" "$LINK"; echo "GNSS PTY: $pty  (symlink $LINK)"     # only now: gnssd must not open a PTY that is about to be recreated

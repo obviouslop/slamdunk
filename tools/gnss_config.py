@@ -55,6 +55,7 @@ def main():
             if r is not False: break
         if n_ == 0 and r is None: print("  receiver does not answer at this baud rate"); sys.exit(2)
         if r and li: tried = tried[li:]; print(f"  (layers {layers} refused, using {ly}: {'RAM only' if ly == 1 else 'RAM+BBR'})")
+        if name.startswith('baud') and r is None: r = True; print('  (no answer to the baud switch is expected: the reply comes at the new rate)')
         bad += r is not True
         print(f"  {name:14s} {'ACK' if r else 'NAK (key not accepted)' if r is False else 'no answer (TX wired? baud?)'}  [layers {ly}]")
     sys.exit(1 if bad else 0)
