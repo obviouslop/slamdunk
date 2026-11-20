@@ -28,7 +28,6 @@ var HIT_PATH := SHM.path_join("pchit.json")
 var STATUS_PATH := SHM.path_join("pcstatus.json")
 var GNSS_PATH := SHM.path_join("gnss.json")
 var GEOREF_PATH := SHM.path_join("georef.json")
-var ALIGN_PATH := SHM.path_join("pcalign.json")
 var ZONES_PATH := SHM.path_join("pczones.json")
 const CTL_S := 1.0 / 30.0
 const HUD_S := 0.1
@@ -149,9 +148,6 @@ var zone_shape := "box"
 var label_idx := 1            # SceneModel.LABELS ("wall")
 var tracing := false          # ZONE outline: trigger held, tracing on the floor
 var zones_shown := true
-var map_from_stage := Transform3D.IDENTITY    # drift correction from the server (target)
-var stage_from_map_shown := Transform3D.IDENTITY   # smoothed, applied to cloud + objects
-var align_seq := -1
 
 
 func _ready() -> void:
@@ -707,15 +703,11 @@ func _cursor() -> Variant:
 	return t.origin + dir * free_dist
 
 
-func _to_map(p: Vector3) -> Vector3:
-	return stage_from_map_shown.affine_inverse() * p
-
-
 func _place() -> void:
 	var c = _cursor()
 	if c == null:
 		return
-	var p := _to_map(c)          # objects are stored in the map frame (same as the saved cloud)
+	var p: Vector3 = c
 	_buzz()
 	match tool:
 		"anchor":
@@ -783,7 +775,7 @@ func _dab(new_stroke: bool) -> void:
 	var c = _cursor()
 	if c == null:
 		return
-	var p := _to_map(c)
+	var p: Vector3 = c
 	if not new_stroke and not sel_centers.is_empty() and (sel_centers[sel_centers.size() - 1] as Vector3).distance_to(p) < brush_r * 0.4:
 		return
 	if new_stroke:
@@ -845,7 +837,7 @@ func _zone_click() -> void:
 	if c == null:
 		_say("point at the floor" if zone_shape == "outline" else "no point under the ray")
 		return
-	var p := _to_map(c)
+	var p: Vector3 = c
 	_buzz()
 	match zone_shape:
 		"box":
@@ -1006,16 +998,6 @@ func _process(delta: float) -> void:
 			hit = h
 			hit_seq = int(h["seq"])
 			hit_rx_ms = Time.get_ticks_msec()
-		var al := _read_json(ALIGN_PATH)
-		if not al.is_empty() and int(al.get("seq", -1)) != align_seq and (al.get("map_from_stage", []) as Array).size() == 12:
-			align_seq = int(al["seq"])
-			var m: Array = al["map_from_stage"]
-			map_from_stage = Transform3D(Basis(Vector3(m[0], m[4], m[8]), Vector3(m[1], m[5], m[9]), Vector3(m[2], m[6], m[10])),
-				Vector3(m[3], m[7], m[11]))
-	# the map (cloud + objects) lives in the server's MAP frame; show it through the (smoothed) drift correction
-	stage_from_map_shown = stage_from_map_shown.interpolate_with(map_from_stage.affine_inverse(), clampf(delta * 4.0, 0.0, 1.0))
-	cloud.transform = stage_from_map_shown
-	model.transform = stage_from_map_shown
 	slow_accum += delta
 	if slow_accum >= 0.5:
 		slow_accum = 0.0
@@ -1064,7 +1046,7 @@ func _process(delta: float) -> void:
 	if tracing:
 		var fp = _floor_point()
 		if fp != null:
-			var mp := _to_map(fp)
+			var mp: Vector3 = fp
 			if pts.is_empty() or (pts[pts.size() - 1] as Vector3).distance_to(mp) > 0.05:
 				pts.append(mp)
 	reticle.scale = Vector3.ONE * (brush_r / 0.008 if tool == "select" and pal_hit == null else 1.0)
@@ -1083,9 +1065,9 @@ func _process(delta: float) -> void:
 			ret_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.95) if on_surface else Color(1.0, 0.6, 0.1, 0.95)
 			_set_ray("right_hand", (cur - rc.global_transform.origin).length(), Color(0.6, 1.0, 0.6) if on_surface else Color(1.0, 0.7, 0.3))
 			if tool in ["box", "path", "measure"]:
-				model.set_preview(tool, pts, _to_map(cur))
+				model.set_preview(tool, pts, cur)
 			elif tool == "zone" and zone_shape in ["box", "outline"]:
-				model.set_preview(zone_shape, pts, _to_map(cur))
+				model.set_preview(zone_shape, pts, cur)
 		else:
 			reticle.visible = false
 			if tool == "paint":
@@ -1147,6 +1129,8 @@ func _update_status() -> void:
 	var ut := Time.get_unix_time_from_system()
 	var dt := Time.get_datetime_dict_from_unix_time(int(ut) + int(Time.get_time_zone_from_system()["bias"]) * 60)
 	status.text += "   %02d:%02d:%02d.%d  f%d" % [dt["hour"], dt["minute"], dt["second"], int(fmod(ut, 1.0) * 10), int(srv.get("frame", -1))]
+	if String(srv.get("origin", "")) != "":
+		status.text += "   " + String(srv["origin"])
 	if not gnss.is_empty():
 		status.text += "   GNSS %s %.2f m%s" % [gnss.get("fix", "?"), float(gnss.get("hacc", -1)),
 			"  geo %.2f" % float(georef.get("rms", 0)) if georef.get("ok", false) else ""]

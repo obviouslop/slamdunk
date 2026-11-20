@@ -33,10 +33,10 @@ def stage_to_blender_matrix(georef=None, enu=False):
 
 
 def read_ply(fn):
-    raw = open(fn, "rb").read(); h = raw.index(b"end_header\n") + 11
-    lab = b"property uchar label" in raw[:h]           # saved with zone labels (tools/zones.py)
-    a = np.frombuffer(raw[h:], dtype=[("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if lab else []))
-    return a["p"].astype(float), a["c"]
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import pcpub                                         # handles the optional label / time / distance columns
+    P, C = pcpub.read_ply(fn)
+    return P.astype(float), C
 
 
 def points_material():

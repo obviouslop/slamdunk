@@ -30,15 +30,20 @@ namespace {
 constexpr int B = 8;               // voxels per block edge
 constexpr int BV = B * B * B;
 
-// 8 bytes per voxel
+// 16 bytes per voxel
 struct Voxel {
     int16_t ts;      // running weighted mean of the normalised signed distance * 32767 (+ = free side)
     uint16_t wq;     // accumulated weight * WQ (capped)
+    uint32_t tms;    // acquisition time (ms since the first integrated frame) of the best (closest) surface observation
     uint8_t nsurf;   // number of frames that observed this voxel inside the band (saturates at 255)
     uint8_t r, g, b;
+    uint8_t dq;      // closest distance (units of DQ m) from which the voxel was observed as surface, 0 = never.
+                     // Stereo depth noise grows with distance squared, so this is the accuracy of the best observation:
+                     // observations from further away than dq get down-weighted (closer, more accurate ones win).
     float tsdf() const { return ts * (1.f / 32767.f); }
 };
 constexpr float WQ = 512.f;
+constexpr float DQ = 0.02f;
 
 inline uint64_t bkey(int x, int y, int z) {
     return (uint64_t(uint32_t(x + (1 << 20)) & 0x1FFFFF)) | (uint64_t(uint32_t(y + (1 << 20)) & 0x1FFFFF) << 21) |
@@ -60,6 +65,8 @@ struct Map {
     std::vector<Voxel> vox_data;               // block number * BV + local
     std::vector<int> born;                     // block number -> frame of allocation
     int frame = 0;
+    double t0 = -1.0;       // time of the first integrated frame (s, caller's clock)
+    std::vector<double> out_t; std::vector<float> out_d;
     std::vector<float> out_xyz; std::vector<uint8_t> out_rgb; std::vector<float> out_w;
 
     int get_or_add(uint64_t k) {
@@ -67,7 +74,7 @@ struct Map {
         if (it != index.end()) return it->second;
         int id = int(keys.size());
         index.emplace(k, id); keys.push_back(k); born.push_back(frame);
-        vox_data.resize(vox_data.size() + BV, Voxel{0, 0, 0, 0, 0, 0});
+        vox_data.resize(vox_data.size() + BV, Voxel{0, 0, 0, 0, 0, 0, 0, 0});
         return id;
     }
     const Voxel* find_voxel(int gx, int gy, int gz) const {
@@ -95,18 +102,20 @@ void* tsdf_new(float voxel, float trunc_min, float trunc_max, float wmax, int th
 void tsdf_free(void* p) { delete static_cast<Map*>(p); }
 void tsdf_reset(void* p) {
     Map* m = static_cast<Map*>(p);
-    m->index.clear(); m->keys.clear(); m->born.clear(); m->vox_data.clear(); m->vox_data.shrink_to_fit(); m->frame = 0;
+    m->index.clear(); m->keys.clear(); m->born.clear(); m->vox_data.clear(); m->vox_data.shrink_to_fit(); m->frame = 0; m->t0 = -1.0;
 }
 int tsdf_nblocks(void* p) { return int(static_cast<Map*>(p)->keys.size()); }
 
 // Z: HxW metric depth along the rectified optical axis (0 = invalid). rgb: HxWx3 uint8 (may be null).
 // mask: HxW uint8, 0 = ignore pixel for surface updates/allocation (paint mode), may be null.
-// world_from_rect: row-major 4x4. Returns number of voxel updates.
+// world_from_rect: row-major 4x4. tstamp: acquisition time of the frame (s). Returns number of voxel updates.
 long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* mask, int W, int H, float f, float cx, float cy,
-                    const double* T, float fB, float sigma_disp, float max_depth, float carve_depth, int alloc_stride) {
+                    const double* T, float fB, float sigma_disp, float max_depth, float carve_depth, int alloc_stride, double tstamp) {
     Map* m = static_cast<Map*>(p);
     const float v = m->vox;
     m->frame++;
+    if (m->t0 < 0.0) m->t0 = tstamp;
+    const uint32_t tms = uint32_t(std::max(0.0, (tstamp - m->t0) * 1000.0));
     float R[9], t[3];
     for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) R[i * 3 + j] = float(T[i * 4 + j]); t[i] = float(T[i * 4 + 3]); }
     auto band = [&](float z) { float s = z * z / fB * sigma_disp; return std::min(m->tmax, std::max(m->tmin, 3.f * s)); };
@@ -194,6 +203,9 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
                     } else if (sd >= -bd) {                 // inside the band
                         if (zm > max_depth || (mask && !mask[pi])) continue;
                         obs = sd / bd; wo = std::min(1.f, 1.f / (zm * zm)); surf = true;
+                        // closer observations are more accurate: once a voxel was seen from dq, further-away views count less
+                        float dm = vx.dq ? vx.dq * DQ : 1e9f, zq = std::max(zm, 0.3f);
+                        if (zq > dm) wo *= (dm / zq) * (dm / zq);
                     } else if (m->back_k > 0.f && sd >= -bd * (1.f + m->back_k) && zm <= max_depth && !(mask && !mask[pi])) {
                         // just behind the measured surface: solid. Only touches voxels that currently claim to be on
                         // the free side, so a real surface further back (seen by other views) is not eroded.
@@ -208,7 +220,12 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
                     vx.wq = uint16_t(std::min(std::min(wn, m->wmax) * WQ, 65535.f));
                     if (surf) {
                         if (vx.nsurf < 255) vx.nsurf++;
-                        if (rgb && std::fabs(sd) < 1.5f * v) {
+                        const bool best = !vx.dq || zm <= vx.dq * DQ * 1.1f;      // as good as the best view so far
+                        if (best) {
+                            vx.tms = tms;
+                            vx.dq = uint8_t(std::min(255.f, std::max(1.f, std::ceil(zm / DQ))));
+                        }
+                        if (best && rgb && std::fabs(sd) < 1.5f * v) {
                             const uint8_t* c3 = rgb + pi * 3;
                             float a = 1.f / std::min<float>(vx.nsurf, 16.f);
                             if (vx.nsurf == 1 || (vx.r | vx.g | vx.b) == 0) { vx.r = c3[0]; vx.g = c3[1]; vx.b = c3[2]; }
@@ -228,7 +245,7 @@ long tsdf_integrate(void* p, const float* Z, const uint8_t* rgb, const uint8_t* 
 int tsdf_extract(void* p, int min_frames, float min_weight) {
     Map* m = static_cast<Map*>(p);
     const float v = m->vox;
-    m->out_xyz.clear(); m->out_rgb.clear(); m->out_w.clear();
+    m->out_xyz.clear(); m->out_rgb.clear(); m->out_w.clear(); m->out_t.clear(); m->out_d.clear();
     const uint16_t wmin = uint16_t(std::min(min_weight * WQ, 65535.f));
     auto ok = [&](const Voxel* q) { return q && q->nsurf >= min_frames && q->wq >= wmin; };
     for (size_t b = 0; b < m->keys.size(); b++) {
@@ -257,6 +274,8 @@ int tsdf_extract(void* p, int min_frames, float min_weight) {
                         m->out_xyz.push_back((gz + 0.5f + s * nb[d][2]) * v);
                         m->out_rgb.push_back(col->r); m->out_rgb.push_back(col->g); m->out_rgb.push_back(col->b);
                         m->out_w.push_back(std::min(a->wq, c->wq) * (1.f / WQ));
+                        const Voxel* tv = (col->dq || !(col == a ? c : a)->dq) ? col : (col == a ? c : a);
+                        m->out_t.push_back(m->t0 + tv->tms * 1e-3); m->out_d.push_back(tv->dq * DQ);
                     }
                 }
     }
@@ -317,154 +336,13 @@ int tsdf_raycast(void* p, const float* o, const float* d, float tmin, float tmax
     return 0;
 }
 
-void tsdf_get(void* p, float* xyz, uint8_t* rgb, float* w) {
+void tsdf_get(void* p, float* xyz, uint8_t* rgb, float* w, double* t, float* d) {
     Map* m = static_cast<Map*>(p);
     std::memcpy(xyz, m->out_xyz.data(), m->out_xyz.size() * sizeof(float));
     std::memcpy(rgb, m->out_rgb.data(), m->out_rgb.size());
     if (w) std::memcpy(w, m->out_w.data(), m->out_w.size() * sizeof(float));
-}
-
-// ---------------------------------------------------------------- drift correction (frame-to-model)
-// Trilinear TSDF sample at world point (x,y,z): value (normalised, -1..1) and gradient (per metre).
-// Returns false unless all 8 neighbours were observed as surface >= min_nsurf times.
-static bool sample(const Map* m, float x, float y, float z, int min_nsurf, float& val, float g[3]) {
-    const float v = m->vox;
-    float qx = x / v - 0.5f, qy = y / v - 0.5f, qz = z / v - 0.5f;
-    int ix = ifloor(qx), iy = ifloor(qy), iz = ifloor(qz);
-    float fx = qx - ix, fy = qy - iy, fz = qz - iz;
-    float c[8];
-    for (int k = 0; k < 8; k++) {
-        const Voxel* q = m->find_voxel(ix + (k & 1), iy + ((k >> 1) & 1), iz + ((k >> 2) & 1));
-        if (!q || q->wq == 0 || q->nsurf < min_nsurf) return false;
-        c[k] = q->tsdf();
-    }
-    auto L = [](float a, float b, float t) { return a + (b - a) * t; };
-    float c00 = L(c[0], c[1], fx), c10 = L(c[2], c[3], fx), c01 = L(c[4], c[5], fx), c11 = L(c[6], c[7], fx);
-    float c0 = L(c00, c10, fy), c1 = L(c01, c11, fy);
-    val = L(c0, c1, fz);
-    // gradient
-    float dx0 = L(c[1] - c[0], c[3] - c[2], fy), dx1 = L(c[5] - c[4], c[7] - c[6], fy);
-    g[0] = L(dx0, dx1, fz) / v;
-    float dy0 = L(c[2] - c[0], c[3] - c[1], fx), dy1 = L(c[6] - c[4], c[7] - c[5], fx);
-    g[1] = L(dy0, dy1, fz) / v;
-    g[2] = (c1 - c0) / v;
-    return true;
-}
-
-static void solve6(double A[36], double b[6], double x[6]) {   // Gaussian elimination with partial pivoting
-    double M[6][7];
-    for (int i = 0; i < 6; i++) { for (int j = 0; j < 6; j++) M[i][j] = A[i * 6 + j]; M[i][6] = b[i]; }
-    for (int c = 0; c < 6; c++) {
-        int p = c; for (int r = c + 1; r < 6; r++) if (std::fabs(M[r][c]) > std::fabs(M[p][c])) p = r;
-        for (int j = 0; j < 7; j++) std::swap(M[c][j], M[p][j]);
-        if (std::fabs(M[c][c]) < 1e-12) { for (int i = 0; i < 6; i++) x[i] = 0; return; }
-        for (int r = c + 1; r < 6; r++) { double f = M[r][c] / M[c][c]; for (int j = c; j < 7; j++) M[r][j] -= f * M[c][j]; }
-    }
-    for (int i = 5; i >= 0; i--) { double s = M[i][6]; for (int j = i + 1; j < 6; j++) s -= M[i][j] * x[j]; x[i] = s / M[i][i]; }
-}
-
-// Align a depth frame to the map: refine world_from_rect T (3x4 row-major doubles, in/out) by Gauss-Newton on the
-// TSDF (point-to-implicit-surface, Huber), damped towards zero motion (prior_rot rad, prior_trans m = 1-sigma).
-// out[0] = number of residuals used, out[1] = rms residual (m) after, out[2] = |rotation| (rad), out[3] = |translation| (m)
-// Returns 1 if T was updated.
-int tsdf_align(void* p, const float* Z, int W, int H, float f, float cx, float cy, double* T, float fB, float sigma_disp,
-               float max_depth, int stride, int iters, int min_nsurf, float prior_rot, float prior_trans,
-               const double* Tp, float abs_rot, float abs_trans, float* out) {
-    // Tp (3x4, optional): raw tracking pose; total correction relative to it is pulled to zero with 1-sigma
-    // abs_rot (yaw, rad) / abs_trans (m), so a small systematic bias cannot make the map creep.
-    Map* m = static_cast<Map*>(p);
-    std::vector<float> P; P.reserve(size_t(W / stride + 1) * (H / stride + 1) * 4);
-    for (int y = 0; y < H; y += stride)
-        for (int x = 0; x < W; x += stride) {
-            float z = Z[y * W + x];
-            if (!(z > 0.f) || z > max_depth) continue;
-            float s = z * z / fB * sigma_disp, bd = std::min(m->tmax, std::max(m->tmin, 3.f * s));
-            P.push_back((x - cx) / f * z); P.push_back((y - cy) / f * z); P.push_back(z); P.push_back(bd);
-        }
-    size_t n = P.size() / 4;
-    double R[9], t[3];
-    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) R[i * 3 + j] = T[i * 4 + j]; t[i] = T[i * 4 + 3]; }
-    double tot_w[3] = {0, 0, 0}, tot_v[3] = {0, 0, 0};   // accumulated rotation vector / translation
-    double off_v[3] = {0, 0, 0}, off_yaw = 0;           // start pose minus tracking pose (camera centre, yaw)
-    if (Tp) {
-        for (int i = 0; i < 3; i++) off_v[i] = t[i] - Tp[i * 4 + 3];
-        // yaw of R Rp^T about world y: from its (0,2)/(2,2)... use the x-z part of the rotated forward axis
-        double a = 0, c = 0;   // sum over axes of sin/cos of the yaw difference
-        for (int k = 0; k < 3; k++) {
-            double ux = R[0 * 3 + k], uz = R[2 * 3 + k], px = Tp[0 * 4 + k], pz = Tp[2 * 4 + k];
-            a += pz * ux - px * uz; c += px * ux + pz * uz;
-        }
-        off_yaw = std::atan2(a, c);
-    }
-    int used = 0; double rms = 0;
-    for (int it = 0; it < iters; it++) {
-        double A[36] = {0}, b[6] = {0}, sr = 0; int cnt = 0;
-#ifdef _OPENMP
-        omp_set_num_threads(m->threads);
-#endif
-#pragma omp parallel
-        {
-            double Al[36] = {0}, bl[6] = {0}, srl = 0; int cl = 0;
-#pragma omp for schedule(static)
-            for (long k = 0; k < long(n); k++) {
-                const float* q = &P[k * 4];
-                double pw[3], pc[3];
-                for (int i = 0; i < 3; i++) pw[i] = R[i * 3] * q[0] + R[i * 3 + 1] * q[1] + R[i * 3 + 2] * q[2] + t[i];
-                float val, g[3];
-                if (!sample(m, float(pw[0]), float(pw[1]), float(pw[2]), min_nsurf, val, g)) continue;
-                if (std::fabs(val) > 0.9f) continue;                 // saturated: outside the band
-                double bd = q[3];
-                double r = val * bd;                                  // metric residual (approx.)
-                double gm[3] = {g[0] * bd, g[1] * bd, g[2] * bd};     // metric gradient (~unit normal)
-                double gn = std::sqrt(gm[0] * gm[0] + gm[1] * gm[1] + gm[2] * gm[2]);
-                if (gn < 0.3 || gn > 3.0) continue;
-                for (int i = 0; i < 3; i++) pc[i] = pw[i] - t[i];    // relative to the camera centre
-                double J[6] = {pc[1] * gm[2] - pc[2] * gm[1], pc[2] * gm[0] - pc[0] * gm[2], pc[0] * gm[1] - pc[1] * gm[0], gm[0], gm[1], gm[2]};
-                double hub = 0.02, w = std::fabs(r) < hub ? 1.0 : hub / std::fabs(r);
-                w /= (q[2] * q[2]);                                   // depth noise ~ Z^2
-                for (int i = 0; i < 6; i++) { bl[i] -= w * J[i] * r; for (int j = 0; j < 6; j++) Al[i * 6 + j] += w * J[i] * J[j]; }
-                srl += r * r; cl++;
-            }
-#pragma omp critical
-            { for (int i = 0; i < 36; i++) A[i] += Al[i]; for (int i = 0; i < 6; i++) b[i] += bl[i]; sr += srl; cnt += cl; }
-        }
-        used = cnt; rms = cnt ? std::sqrt(sr / cnt) : 0;
-        if (cnt < 200) return 0;
-        // prior: total motion ~ N(0, prior); normalise by the data scale so it acts like `cnt` pseudo-observations
-        double scale = 0; for (int i = 0; i < 6; i++) scale += A[i * 6 + i]; scale /= 6.0;
-        for (int i = 0; i < 3; i++) {
-            double lr = scale * 1e-4 / (prior_rot * prior_rot), lt = scale * 1e-4 / (prior_trans * prior_trans);
-            A[i * 6 + i] += lr; b[i] -= lr * tot_w[i];
-            A[(i + 3) * 6 + i + 3] += lt; b[i + 3] -= lt * tot_v[i];
-        }
-        if (Tp) {
-            double la = scale * 1e-4 / (abs_trans * abs_trans), lr = scale * 1e-4 / (abs_rot * abs_rot);
-            for (int i = 0; i < 3; i++) { A[(i + 3) * 6 + i + 3] += la; b[i + 3] -= la * (tot_v[i] + off_v[i]); }
-            A[1 * 6 + 1] += lr; b[1] -= lr * (tot_w[1] + off_yaw);
-        }
-        // gravity is known from tracking: no roll/pitch correction (4 DoF: yaw about world y + translation)
-        A[0 * 6 + 0] += scale * 1e6; A[2 * 6 + 2] += scale * 1e6;
-        double x[6]; solve6(A, b, x);
-        // apply: p' = Rw (p - t) + t + v  ->  R <- Rw R,  t <- t + v
-        double th = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
-        double Rw[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-        if (th > 1e-12) {
-            double k[3] = {x[0] / th, x[1] / th, x[2] / th}, c = std::cos(th), s = std::sin(th), C = 1 - c;
-            Rw[0] = c + k[0] * k[0] * C; Rw[1] = k[0] * k[1] * C - k[2] * s; Rw[2] = k[0] * k[2] * C + k[1] * s;
-            Rw[3] = k[1] * k[0] * C + k[2] * s; Rw[4] = c + k[1] * k[1] * C; Rw[5] = k[1] * k[2] * C - k[0] * s;
-            Rw[6] = k[2] * k[0] * C - k[1] * s; Rw[7] = k[2] * k[1] * C + k[0] * s; Rw[8] = c + k[2] * k[2] * C;
-        }
-        double Rn[9];
-        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) Rn[i * 3 + j] = Rw[i * 3] * R[j] + Rw[i * 3 + 1] * R[3 + j] + Rw[i * 3 + 2] * R[6 + j];
-        std::memcpy(R, Rn, sizeof R);
-        for (int i = 0; i < 3; i++) { t[i] += x[3 + i]; tot_w[i] += x[i]; tot_v[i] += x[3 + i]; }
-        if (th < 1e-5 && std::sqrt(x[3] * x[3] + x[4] * x[4] + x[5] * x[5]) < 1e-5) break;
-    }
-    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) T[i * 4 + j] = R[i * 3 + j]; T[i * 4 + 3] = t[i]; }
-    out[0] = float(used); out[1] = float(rms);
-    out[2] = float(std::sqrt(tot_w[0] * tot_w[0] + tot_w[1] * tot_w[1] + tot_w[2] * tot_w[2]));
-    out[3] = float(std::sqrt(tot_v[0] * tot_v[0] + tot_v[1] * tot_v[1] + tot_v[2] * tot_v[2]));
-    return 1;
+    if (t) std::memcpy(t, m->out_t.data(), m->out_t.size() * sizeof(double));
+    if (d) std::memcpy(d, m->out_d.data(), m->out_d.size() * sizeof(float));
 }
 
 }  // extern "C"

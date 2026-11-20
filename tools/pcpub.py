@@ -59,26 +59,38 @@ def publish(xyz, rgb, path=PATH, max_points=400000, seq=None, tile=1.0):
     return n
 
 
-def read_ply(fn):
+def read_ply(fn, attrs=False):
+    """-> P, C  (attrs=True: P, C, dict with the optional columns label / time / distance)"""
     raw = open(fn, "rb").read(); h = raw.index(b"end_header\n") + 11
-    lab = b"property uchar label" in raw[:h]
-    a = np.frombuffer(raw[h:], dtype=[("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if lab else []))
+    hd = raw[:h]
+    dt = [("p", "<f4", 3), ("c", "u1", 3)]
+    if b"property uchar label" in hd: dt.append(("label", "u1"))
+    if b"property double time" in hd: dt.append(("time", "<f8"))
+    if b"property float distance" in hd: dt.append(("distance", "<f4"))
+    a = np.frombuffer(raw[h:], dtype=dt)
+    if attrs:
+        return a["p"], a["c"], {k: a[k] for k in ("label", "time", "distance") if k in a.dtype.names}
     return a["p"], a["c"]
 
 
-def write_ply(fn, P, C, L=None):
-    """P (N,3) float, C (N,3) RGB float 0..1 or uint8, L (N,) uint8 label ids (tools/zones.py LABELS) or None."""
+def write_ply(fn, P, C, L=None, t=None, dist=None):
+    """P (N,3) float, C (N,3) RGB float 0..1 or uint8, L (N,) uint8 label ids (tools/zones.py LABELS) or None,
+    t (N,) acquisition time in s (the arcgrab / recording clock, double), dist (N,) distance in m of the closest view
+    (the depth noise grows with its square: use it to cull the less accurate points)."""
     os.makedirs(os.path.dirname(os.path.abspath(fn)), exist_ok=True)
     C = np.asarray(C); C = C if C.dtype == np.uint8 else np.clip(C * 255 + 0.5, 0, 255).astype(np.uint8)
-    dt = [("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if L is not None else [])
+    dt = [("p", "<f4", 3), ("c", "u1", 3)] + ([("l", "u1")] if L is not None else []) + ([("t", "<f8")] if t is not None else []) \
+        + ([("d", "<f4")] if dist is not None else [])
     rec = np.empty(len(P), dtype=dt); rec["p"] = P; rec["c"] = C
-    if L is not None:
-        rec["l"] = L
+    if L is not None: rec["l"] = L
+    if t is not None: rec["t"] = t
+    if dist is not None: rec["d"] = dist
     with open(fn, "wb") as fh:
         fh.write(f"ply\nformat binary_little_endian 1.0\nelement vertex {len(P)}\nproperty float x\nproperty float y\nproperty float z\n"
                  "property uchar red\nproperty uchar green\nproperty uchar blue\n".encode())
-        if L is not None:
-            fh.write(b"property uchar label\n")
+        if L is not None: fh.write(b"property uchar label\n")
+        if t is not None: fh.write(b"property double time\n")
+        if dist is not None: fh.write(b"property float distance\n")
         fh.write(b"end_header\n"); fh.write(rec.tobytes())
 
 

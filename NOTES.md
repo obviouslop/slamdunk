@@ -315,10 +315,9 @@ Analysis of live6:
 * Pose timing re-fitted on live6 (re/calib_world.py): best delta -4.6 ms, extrinsic refit improves the
   3-D residual only 5.83 -> 5.67 cm => our cloud geometry/timing is fine; residual = stereo noise.
 * While arcgrab owns the colour cameras the passthrough falls back to the IR tracking cameras (blue-ish
-  composited view). SteamVR reprojects passthrough onto a depth *proxy* (the roomview mesh we decoded):
-  anything not at the proxy depth shows parallax vs. correctly world-locked content. Our points are
-  world-locked, so part of the mismatch is the passthrough, not the cloud. The other part is real:
-  spray/fog points at wrong depth slide over the image when the eyes translate -> fixed by TSDF below.
+  composited view). [Superseded 2026-11-20: the passthrough-proxy explanation of the apparent scale/anchoring problem
+  was wrong, the cause was foveated rendering - see the last section.] Spray/fog points at wrong depth slide over
+  the image when the eyes translate -> fixed by TSDF below.
 * Godot ran at 72 fps = display rate (Frame refresh 72 Hz) but reloading 400k points took 36-60 ms on the
   main thread every publish -> dropped frames -> the cloud judders vs. compositor-rendered windows.
   Fixed by tiled loading (only changed 1 m tiles, per-frame budget, frustum-culled AABBs).
@@ -432,20 +431,10 @@ Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answe
   Whole-session hold-out: bias -3.47 -> -0.45 cm, consistent(|r|<2) 36.9 -> 42.0 %, outside +-3 sigma
   50.3 -> 43.2 % (front 5.1 -> 14.0, behind 45.2 -> 29.2; the old low "floater" figure was partly the 3 cm
   shift), points 242k -> 212k.
-* Drift correction: tsdf_align = frame-to-map registration (Gauss-Newton on the trilinear TSDF, Huber,
-  4 DoF: yaw + translation, gravity kept; damped per frame and pulled towards the raw tracking pose with
-  1-sigma abs_trans 8 cm so it cannot creep). 2.7 ms/frame, aligns ~80 % of frames (rest = new areas).
-  With the OLD fusion it crept 0.4-1.1 m downwards (bias feedback) -> only usable with the balanced fusion.
-* User-facing metric (re/live_metric.py: map as of time k vs depth at frame k, correction from frames < k):
-     old:                         bias -2.40 cm, within 3 cm 30.6 %, 176k points
-     balanced fusion:             bias +0.82 cm, within 3 cm 35.1 %, 104k points
-     balanced + drift correction: bias +0.55 cm, within 3 cm 38.3 %, 105k points, correction <= 10 cm
-* Live pipeline: pcserver keeps the map in a MAP frame, publishes map_from_stage in /dev/shm/pcalign.json
-  per frame; raycast/paint aim transformed; viewer shows cloud + objects through the smoothed inverse, new
-  objects stored in map coordinates (= saved PLY frame). Stills record map_from_stage.
-  Limitations: the correction restarts at identity with each server start (autosaved objects can be off by
-  the previous session's correction, <~10 cm); gnssd georef is fitted in STAGE (error <= the correction).
-  --no-align disables it. Replay test: 302 frames, final correction 3 cm, yaw 0.05 deg.
+* Drift correction (tsdf_align frame-to-map registration, pcalign.json, viewer map_from_stage): REMOVED 2026-11-20. It
+  moved the map up to 20 cm without an accuracy gain; the "drift" it fought was the foveation artefact (last section).
+  Real tracker error is now measured with immobile AprilTag boards (tools/fid_analyze.py, tools/origin.py).
+  The balanced fusion (carve_w / back_w) stays: its bias gain was measured on data (re/live_metric.py).
 
 ## 2026-11-18 live8 feedback (toolbox not clickable, toolbox "sinks into the floor")
 * Logs: native Frame profile was active and SteamVR accepted all suggested bindings (incl. right
@@ -458,12 +447,9 @@ Tested on replay (EXIF checked with exiv2, GPS with a fake georef). Server answe
   one line high (+ artificial horizon: pitch / roll / heading of the HMD pose, 4 cm at 0.7 m) and a hint/
   message line low.
 * "Toolbox closer than the controller when near the face, sinks into the floor when standing up", and the
-  same for the cloud: depth-dependent mismatch between our correctly placed content and the passthrough.
-  SteamVR reprojects the (IR fallback) passthrough onto a depth proxy (roomview3d, a view-facing plane when
-  we hold the colour cameras), so real surfaces appear at the proxy distance. SteamVR exposes no app
-  passthrough-mesh extension (only XR_KHR_composition_layer_depth). Test: close one eye - if the toolbox
-  then sits on the controller, it is the passthrough depth. Experiment: pcsession --depth (Godot submits
-  its depth buffer; the compositor has an UpdateReprojectionDepth path).
+  same for the cloud: depth-dependent mismatch of our content. [Superseded 2026-11-20: foveated rendering, not
+  the passthrough depth proxy - see the last section.] Experiment then: pcsession --depth (Godot submits its depth
+  buffer; XR_KHR_composition_layer_depth) - kept, the user found it helps and the note below says keep it.
 * live8 check of the fusion fix (re/live_metric.py): old bias -2.19 cm / 33.7 % within 3 cm, new +1.4 cm /
   36.3 %, fewer points; back_w 3 chosen (live7 +0.39 cm / 39.3 %).
 
@@ -556,14 +542,11 @@ TODO: depth-correct own passthrough (user approved).
   text change); pcserver and liverec run with nice 8 so the viewer gets the CPU first (5 cores, pcserver ~1.5).
 - (live14 used the IR passthrough: blue tint in the composited captures.)
 
-## live15: drift correction off by default
+## live15: drift correction off by default (superseded: the drift correction was removed on 2026-11-20)
 - User: a SteamVR window pinned to the TV moved 2-3 cm while walking around (= tracking limit); the cloud still felt
   less anchored, fps solid at 72 with depth submitted.
-- Replay of live15 through pcserver: the drift correction (tsdf_align) moved the whole map up to 19 cm vertically and
-  6 cm sideways over the session, back and forth -> the cloud slides against reality while SteamVR content does not.
-- re/live_metric.py on live15 (min_frames 6, carve 0.3, back 8/3): no align bias -0.11 cm, 35.0 % within 3 cm;
-  align bias +0.11 cm, 35.3 % within 3 cm, correction up to 20.5 cm. No accuracy gain -> pcserver --align is now
-  opt-in (default: map frame = STAGE). The earlier "drift" (live7) was most likely the depth bias + passthrough effect.
+- Replay of live15: the drift correction moved the map up to 19 cm without accuracy gain (re/live_metric.py 35.0 % vs
+  35.3 % within 3 cm) -> it was switched off, then removed.
 - Session logs now in captures/logs/pcsession (was /tmp/pcsession: tmpfs = RAM); scratch outputs in captures/scratch.
 
 ## live16: "far too far, near okay" - checks of the data (all negative)
@@ -576,6 +559,58 @@ TODO: depth-correct own passthrough (user approved).
   inconsistent in sign (+-5 cm) -> no systematic effect.
 - re/far_outliers.py "behind a known surface" rates (55 % at 1.4-1.8 m) are mostly an artefact of the splatted
   reference on cluttered shelves (checked visually, captures/scratch/outliers16.jpg) - not used.
-=> point positions are metric within ~1-2 %. live13-16 composited captures show the IR passthrough, which SteamVR
-   draws at a fixed proxy depth -> far real objects appear closer than they are, so correct points look "too far".
-   Decisive tests (user): colour passthrough vs IR, DEPTH VIEW, and touching far surfaces with a controller.
+=> point positions are metric within ~1-2 % (so the cloud geometry was never the problem). The IR-passthrough
+   hypothesis that was written here was wrong; the root cause is below.
+
+## 2026-11-20 ROOT CAUSE of the "wrong world scale / far points too far / cloud not anchored": foveated rendering
+- Found by the user (notes.md): Godot's OpenXR foveation (project.godot openxr/foveation_level=3, dynamic) plus
+  start_vr.gd's `vp.vrs_mode = Viewport.VRS_XR` rendered the world with a variable-rate-shading / foveation transform
+  that warps the apparent scale and anchoring of rendered content. Fix: openxr/foveation_level=0,
+  openxr/foveation_dynamic=false, VRS branch removed from start_vr.gd. Keep openxr/submit_depth_buffer=true
+  (viewer/override.cfg written by pcsession.sh; turning it off made anchoring worse).
+- Why the data checks above were all negative: the data was right, the rendering was not.
+- Removed as non-fixes of this problem: pcserver drift correction (--align, pcalign.json, tsdf_align in C++/python,
+  viewer map_from_stage / _to_map), re/align_bias.py, re/far_outliers.py, re/head_scale.py, the tscale / align
+  options of re/live_metric.py and the aligner test in re/tsdf_synth.py. Kept (they are measured improvements or
+  unrelated features): depth submission, balanced fusion, depth calibration (k=1.024, d0=+0.785 px, validated with the
+  controllers), HUD text at 10 Hz, process priorities, re/far_bias.py (multi-view depth-bias meter).
+- To verify in the headset: floor / ceiling / controllers should no longer sink or scale when standing up / sitting
+  down; the cloud should hold like the SteamVR windows (which still drift 2-3 cm = tracker limit, now measurable).
+
+## 2026-11-20 per-point acquisition time and view distance
+- Every TSDF voxel stores (src/tsdf.cpp Voxel, 16 B): `tms` = acquisition time (ms since the first frame, caller's clock
+  = arcgrab frame ts) and `dq` = the closest distance it was ever observed from (2 cm units). Both belong to the
+  best (closest) observation: a view counts as "as good" when its distance <= 1.1 x dq.
+- Accuracy-based culling: stereo depth noise grows with distance squared, so observations of a voxel from further
+  away than dq are down-weighted by (dq/z)^2 (on top of the existing 1/z^2) and do not update colour or stamp. Getting
+  closer to a surface therefore pulls its points to the accurate position (re/test_point_attrs.py: a +3 cm far-view
+  bias is corrected to +0.2 cm by a 0.8 m view and a later far view does not undo it).
+- Extraction: TSDF.extract(attrs=True) -> P, C, w, t, d. Saved PLYs get `property double time` and `property float
+  distance` (tools/pcpub.py write_ply/read_ply(attrs=True); blender_import / plyrender tolerate the columns). Use `distance`
+  to cull (e.g. keep d < 1.5 m) and `time` to find the frame (frames.jsonl ts, HUD fNNNN).
+
+## 2026-11-20 AprilTag fiducials (tagStandard41h12)
+- tools/fiducials.py: own detector (OpenCV has no 41h12; codes + layout from ~/code/apriltag tagStandard41h12.c, stored
+  as tools/data/tag41h12.json; nothing from that repo is executed). Quad = the white 5x5 square inside the black ring
+  (edge = 5/9 of the printed 9x9 size). Corner order TL TR BR BL, marker frame x right / y up / z out of the paper.
+  Boards: "cal" ids 0-3 (0 TL, 1 TR, 2 BR, 3 BL, 150 x 200 mm centre to centre, 50 mm markers - verified against the
+  SVG), "origin" id 4 (edge ORIGIN_MM = 50, change when printed). Several physical copies of the cal board
+  (ceiling / floor / table) share ids: told apart by position in STAGE (group_boards).
+- A single small tag has two near-equal pose solutions (flip): solve_pose_all returns both, `prior=` resolves it, the
+  ambiguity ratio gates the unreliable ones. 4-tag boards are unambiguous and ~10x more accurate: use the cal board for
+  measurements, and consider a bigger / multi-tag origin marker (50 mm at 1232 px binned is detectable to ~1 m only).
+- re/test_fiducials.py (synthetic renders: 0.2-0.6 mm / 0.02-0.17 deg), re/make_fid_rec.py (synthetic recording
+  through the real fisheye calibration with an injected tracker drift) -> tools/fid_analyze.py recovers it.
+- tools/fid_analyze.py RECDIR: full-resolution detection; (1) tracker pose error from the spread of immobile boards
+  (by distance, head speed, drift vs jitter), (2) --hmd500: camera<->pose time offset scan, (3) stereo consistency of the
+  board pose vs calibrated extrinsics, (4) undistortion residual by image radius + --refit new fisheye intrinsics from
+  the boards (not applied automatically), (5) --write-corrected: frames_fid.jsonl with poses corrected so the anchor
+  boards stay put (reference = board median pose; correction smoothed +-1 s). Replay/fuse with that file.
+- Live origin marker (tools/origin.py, pcserver default on, --no-origin / --origin-mm / --origin-frame): worker thread
+  detects id 4 in the half-res left image, collects its STAGE pose, freezes a reference after 12 good views
+  (Hamming <= 1, reprojection < 0.12 px), then reports the live SteamVR deviation (HUD "origin: locked, SteamVR dev
+  N mm / D deg") and a smoothed correction in /dev/shm/pcorigin.json. Saved PLYs get a <name>.ply.json sidecar with
+  stage_from_origin (and are written in the marker frame with --origin-frame), so scans of different sessions can be
+  registered to the same real-world origin. Live pose correction is NOT applied yet (only offline via fid_analyze).
+- Not yet measured on real captures (the boards were just printed): next step is a recording with the boards on ceiling /
+  floor / table and the origin marker, then `fid_analyze.py captures/liveN --hmd500 --refit --write-corrected`.

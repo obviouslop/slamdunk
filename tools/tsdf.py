@@ -24,12 +24,11 @@ def _load():
     vp, fp, ip, dp, up = ctypes.c_void_p, ctypes.c_float, ctypes.c_int, ctypes.POINTER(ctypes.c_double), ctypes.c_void_p
     L.tsdf_new.restype = vp; L.tsdf_new.argtypes = [fp, fp, fp, fp, ip]
     L.tsdf_set.argtypes = [vp, ip, fp]
-    L.tsdf_align.argtypes = [vp, up, ip, ip, fp, fp, fp, dp, fp, fp, fp, ip, ip, ip, fp, fp, dp, fp, fp, up]
     L.tsdf_free.argtypes = [vp]; L.tsdf_reset.argtypes = [vp]; L.tsdf_nblocks.argtypes = [vp]
     L.tsdf_integrate.restype = ctypes.c_long
-    L.tsdf_integrate.argtypes = [vp, up, up, up, ip, ip, fp, fp, fp, dp, fp, fp, fp, fp, ip]
+    L.tsdf_integrate.argtypes = [vp, up, up, up, ip, ip, fp, fp, fp, dp, fp, fp, fp, fp, ip, ctypes.c_double]
     L.tsdf_extract.argtypes = [vp, ip, fp]
-    L.tsdf_get.argtypes = [vp, up, up, up]
+    L.tsdf_get.argtypes = [vp, up, up, up, up, up]
     L.tsdf_gc.argtypes = [vp, ip, ip]
     L.tsdf_raycast.argtypes = [vp, up, up, fp, fp, ip, up]
     L.pc_bin_raw10.argtypes = [up, ip, ip, ip, ip, fp, up, ip]
@@ -78,8 +77,8 @@ class TSDF:
     def nblocks(self):
         return self.L.tsdf_nblocks(self.h)
 
-    def integrate(self, ls, Z, rgb, world_from_rect, mask=None):
-        """Z: HxW float32 depth (rectified camL view, 0 = invalid), rgb HxWx3 uint8, mask HxW uint8/bool or None."""
+    def integrate(self, ls, Z, rgb, world_from_rect, mask=None, t=0.0):
+        """t = acquisition time of the frame (s); stored per voxel for the closest observation. Z: HxW float32 depth (rectified camL view, 0 = invalid), rgb HxWx3 uint8, mask HxW uint8/bool or None."""
         H, W = Z.shape
         Z = np.ascontiguousarray(Z, np.float32); rgb = np.ascontiguousarray(rgb, np.uint8)
         T = np.ascontiguousarray(world_from_rect, np.float64)
@@ -87,32 +86,11 @@ class TSDF:
         n = self.L.tsdf_integrate(self.h, Z.ctypes.data, rgb.ctypes.data, None if mk is None else mk.ctypes.data, W, H,
                                   float(ls.f), float(ls.P1[0, 2]), float(ls.P1[1, 2]),
                                   T.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), float(ls.f * ls.baseline),
-                                  self.sigma_disp, self.max_depth, self.carve_depth, self.alloc_stride)
+                                  self.sigma_disp, self.max_depth, self.carve_depth, self.alloc_stride, float(t))
         self.frames += 1
         if self.gc_every and self.frames % self.gc_every == 0:
             self.gc()
         return n
-
-    def align(self, ls, Z, world_from_rect, stride=4, iters=6, min_nsurf=3, prior_rot=0.005, prior_trans=0.02,
-              tracking=None, abs_rot=0.03, abs_trans=0.15):
-        """Frame-to-model registration: refine world_from_rect (4x4) so the depth frame Z fits the map (4 DoF: yaw +
-        translation; prior_* = 1-sigma per-frame step, abs_* = 1-sigma total correction w.r.t. `tracking` (raw pose)).
-        -> (T_refined 4x4, info dict) or (None, info) if there was not enough overlap."""
-        H, W = Z.shape
-        Z = np.ascontiguousarray(Z, np.float32)
-        T = np.ascontiguousarray(np.asarray(world_from_rect, np.float64)[:3, :4].copy())
-        out = np.zeros(4, np.float32)
-        Tp = None if tracking is None else np.ascontiguousarray(np.asarray(tracking, np.float64)[:3, :4].copy())
-        ok = self.L.tsdf_align(self.h, Z.ctypes.data, W, H, float(ls.f), float(ls.P1[0, 2]), float(ls.P1[1, 2]),
-                               T.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), float(ls.f * ls.baseline), self.sigma_disp,
-                               self.max_depth, stride, iters, min_nsurf, prior_rot, prior_trans,
-                               None if Tp is None else Tp.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), abs_rot, abs_trans,
-                               out.ctypes.data)
-        info = dict(n=int(out[0]), rms=float(out[1]), rot=float(out[2]), trans=float(out[3]))
-        if not ok:
-            return None, info
-        R = np.eye(4); R[:3, :4] = T
-        return R, info
 
     def gc(self, min_age=30, min_nsurf=2):
         return self.L.tsdf_gc(self.h, min_age, min_nsurf)
@@ -125,12 +103,16 @@ class TSDF:
             return out[:3].copy(), out[3:6].copy(), float(out[6])
         return None
 
-    def extract(self, min_frames=3, min_weight=0.0):
+    def extract(self, min_frames=3, min_weight=0.0, attrs=False):
+        """-> P, C, w  (attrs=True: P, C, w, t, d  with t = acquisition time (s) and d = distance (m) of the closest
+        view of each point; depth noise ~ d^2, so d is the point's accuracy class)."""
         n = self.L.tsdf_extract(self.h, min_frames, min_weight)
         P = np.empty((n, 3), np.float32); C = np.empty((n, 3), np.uint8); w = np.empty(n, np.float32)
+        t = np.empty(n, np.float64); d = np.empty(n, np.float32)
         if n:
-            self.L.tsdf_get(self.h, P.ctypes.data, C.ctypes.data, w.ctypes.data)
-        return P, C.astype(np.float32) / 255, w
+            self.L.tsdf_get(self.h, P.ctypes.data, C.ctypes.data, w.ctypes.data, t.ctypes.data, d.ctypes.data)
+        out = (P, C.astype(np.float32) / 255, w)
+        return out + (t, d) if attrs else out
 
 
 def cone_pixels(ls, Z, world_from_rect, aim, half_angle_deg):

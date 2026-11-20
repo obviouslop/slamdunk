@@ -10,7 +10,7 @@ ap.add_argument("--yup",action="store_true",help="input is y-up (OpenVR world): 
 a=ap.parse_args()
 raw=open(a.ply,'rb').read(); h=raw.index(b'end_header\n')+11
 hdr=raw[:h].decode(); has_col='red' in hdr
-dt=[('p','<f4',3)]+([('c','u1',3)] if has_col else [('h','u1')])+([('l','u1')] if 'label' in hdr else [])
+dt=[('p','<f4',3)]+([('c','u1',3)] if has_col else [('h','u1')])+([('l','u1')] if 'label' in hdr else [])+([('t','<f8')] if 'double time' in hdr else [])+([('d','<f4')] if 'float distance' in hdr else [])
 pts=np.frombuffer(raw[h:],dtype=dt); P=pts['p'].astype(float)
 C=pts['c'].astype(np.uint8) if has_col else np.full((len(P),3),200,np.uint8)
 if a.yup: P=P*np.array([1,-1,-1.])

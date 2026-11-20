@@ -10,7 +10,6 @@ Viewer interface (all in /dev/shm, JSON, written atomically):
   pcctl.json    viewer -> server, 10-30 Hz: {t_ms, scan: auto|paint|off, painting, aim[12], cmd, cmd_seq, name}
   pchit.json    server -> viewer, 30 Hz: first TSDF surface along the right controller aim ray
                 {seq, hit, dist, p[3], n[3]}   (picking for anchors / boxes / paths)
-  pcalign.json  server -> viewer, per fused frame: {seq, map_from_stage[12] (3x4 row-major)}: drift correction.
                 The map (cloud, raycast hits, saved PLY) lives in the MAP frame; the viewer shows it through
                 stage_from_map = inverse(map_from_stage) so old scans follow tracking drift.
   pcstatus.json server -> viewer, 1 Hz: {fps, points, blocks, scan, saved, still, stills}
@@ -29,6 +28,8 @@ import ptpub
 import zones as zonemod
 import pcpub
 import stills
+import fiducials
+from origin import OriginTracker
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--scale", type=float, default=0.35)
@@ -37,10 +38,6 @@ ap.add_argument("--min-frames", type=int, default=6, help="frames a surface must
 ap.add_argument("--carve-w", type=float, default=0.3, help="weight of free-space votes (balanced against --back-w)")
 ap.add_argument("--back-k", type=float, default=8.0, help="solid votes up to (1+k) bands behind each measured surface")
 ap.add_argument("--back-w", type=float, default=3.0, help="weight of the solid votes (removes surfaces left behind by drift)")
-ap.add_argument("--align", action="store_true", help="enable drift correction (frame-to-map registration). Off by default: "
-               "on live15 it moved the map up to 19 cm while SteamVR tracking itself holds ~2-3 cm")
-ap.add_argument("--no-align", action="store_true", help=argparse.SUPPRESS)      # old flag, now the default
-ap.add_argument("--abs-trans", type=float, default=0.08, help="1-sigma of the total drift correction (m)")
 ap.add_argument("--maxdepth", type=float, default=2.5, help="surfaces are only taken up to this distance (m)")
 ap.add_argument("--carve-depth", type=float, default=4.0, help="free-space carving up to this distance (m)")
 ap.add_argument("--min-depth", type=float, default=0.35)
@@ -48,6 +45,10 @@ ap.add_argument("--publish-every", type=float, default=1.0)
 ap.add_argument("--tile", type=float, default=1.0, help="tile size (m) of the published cloud")
 ap.add_argument("--max-pub", type=int, default=300000)
 ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker threads (leave cores for XR)")
+ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
+ap.add_argument("--origin-mm", type=float, help="printed edge of the origin marker in mm (default fiducials.ORIGIN_MM)")
+ap.add_argument("--origin-frame", action="store_true", help="save PLYs in the origin-marker frame (x right, y up, z out of the paper) "
+                "when the marker is locked; default: STAGE coordinates, with the marker pose in the <name>.ply.json sidecar")
 ap.add_argument("--passthrough", action="store_true", help="always publish depth-passthrough frames (else only when the viewer asks)")
 ap.add_argument("--seconds", type=float, default=0, help="stop after N s (0 = run forever)")
 ap.add_argument("--pair-tol", type=float, default=0.015, help="max |ts_L - ts_R| (s)")
@@ -56,7 +57,6 @@ a = ap.parse_args()
 
 SHM = "/dev/shm"
 CTL_PATH, HIT_PATH, STATUS_PATH = f"{SHM}/pcctl.json", f"{SHM}/pchit.json", f"{SHM}/pcstatus.json"
-ALIGN_PATH = f"{SHM}/pcalign.json"
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "sessions")
 cv2.setNumThreads(a.threads)
 
@@ -82,36 +82,25 @@ def read_ctl():
 lock = threading.Lock()
 ts = TSDF(voxel=a.voxel, max_depth=a.maxdepth, carve_depth=a.carve_depth, threads=a.threads,
           carve_w=a.carve_w, back_k=a.back_k, back_w=a.back_w)
-Tc = np.eye(4)            # map_from_stage drift correction
-align_seq = 0
-
-
-def write_align():
-    global align_seq
-    align_seq += 1
-    try: write_json(ALIGN_PATH, {"seq": align_seq, "map_from_stage": Tc[:3, :4].ravel().round(6).tolist()})
-    except OSError: pass
-
-
 def to_map(A34):
-    """3x4 STAGE pose/aim -> MAP frame"""
-    M = np.eye(4); M[:3, :4] = np.asarray(A34, float).reshape(3, 4); return (Tc @ M)[:3, :4]
+    """3x4 STAGE pose/aim (the map frame is STAGE)"""
+    M = np.eye(4); M[:3, :4] = np.asarray(A34, float).reshape(3, 4); return M[:3, :4]
 stop = False
 zf = zonemod.ZoneFile()       # inclusion / exclusion / label zones from the viewer (MAP frame)
 
 
 def extract_kept():
-    """Fused surface points with the zones applied -> P, C, labels"""
+    """Fused surface points with the zones applied -> P, C, labels, acquisition time (s), view distance (m)"""
     with lock:
-        P, C, w = ts.extract(min_frames=a.min_frames)
+        P, C, w, t, d = ts.extract(min_frames=a.min_frames, attrs=True)
     if not zf.zones:
-        return P, C, np.zeros(len(P), np.uint8)
+        return P, C, np.zeros(len(P), np.uint8), t, d
     keep, lab = zonemod.evaluate(P, zf.zones)
-    return P[keep], C[keep], lab[keep]
+    return P[keep], C[keep], lab[keep], t[keep], d[keep]
 
 
 def publish_cloud():
-    P, C, _ = extract_kept()
+    P, C = extract_kept()[:2]
     return pcpub.publish(P, C, max_points=a.max_pub, tile=a.tile)
 
 
@@ -135,8 +124,7 @@ def pick_loop():
         seq += 1
         d = {"seq": seq, "aim_t_ms": last_t, "hit": h is not None}
         if h is not None:
-            Ti = np.linalg.inv(Tc)                       # report in STAGE (dist is frame independent)
-            d.update(p=(Ti[:3, :3] @ h[0] + Ti[:3, 3]).tolist(), n=(Ti[:3, :3] @ h[1]).tolist(), dist=h[2])
+            d.update(p=np.asarray(h[0]).tolist(), n=np.asarray(h[1]).tolist(), dist=h[2])
         try: write_json(HIT_PATH, d)
         except OSError: pass
 
@@ -145,6 +133,8 @@ while True:   # wait for the frame source (arcgrab or replay_shm.py)
     try: s = ArcShm(); break
     except (FileNotFoundError, RuntimeError, ValueError): print("waiting for /dev/shm/arcgrab ...", flush=True); time.sleep(1)
 ls = LiveStereo(scale=a.scale, max_depth=a.maxdepth, min_depth=a.min_depth)
+if a.origin_mm: fiducials.BOARDS["origin"]["tag_mm"] = a.origin_mm
+origin = None if a.no_origin else OriginTracker(ls, path=f"{SHM}/pcorigin.json")
 threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
 last_frame = -1; n_pt = 0; t_frame_status = 0.0; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
@@ -165,26 +155,33 @@ def take_still():
 
 def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
-                                 scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame))
+                                 scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame,
+                                 origin=origin.hud() if origin else ""))
 
 
 last_fps = 0.0
 
 
 def handle_cmd(ctl):
-    global last_cmd_seq, saved, Tc
+    global last_cmd_seq, saved
     if ctl.get("cmd_seq") == last_cmd_seq:
         return
     if last_cmd_seq is not None:
         c = ctl.get("cmd")
         if c == "reset":
-            with lock: ts.reset(); Tc = np.eye(4)
-            write_align()
+            with lock: ts.reset()
             print("map reset", flush=True)
         elif c == "save":
             name = os.path.basename(ctl.get("name") or time.strftime("scan_%Y%m%d_%H%M%S"))
-            P, C, L = extract_kept()
-            fn = os.path.join(SAVE_DIR, name + ".ply"); pcpub.write_ply(fn, P, C, L if L.any() else None); saved = fn
+            P, C, L, tt, dd = extract_kept()
+            fn = os.path.join(SAVE_DIR, name + ".ply")
+            Po = origin.to_origin_frame(P) if origin else None
+            pcpub.write_ply(fn, P if Po is None or not a.origin_frame else Po, C, L if L.any() else None, t=tt, dist=dd); saved = fn
+            if origin and origin.stage_from_origin is not None:            # ties the cloud to the real world (re-usable across sessions)
+                json.dump(dict(frame="origin" if a.origin_frame else "stage", origin_id=fiducials.ORIGIN_ID,
+                               origin_mm=fiducials.BOARDS["origin"]["tag_mm"], stage_from_origin=origin.stage_from_origin.tolist(),
+                               marker_frame="x right, y up, z out of the paper, origin at the marker centre",
+                               time_range=[float(tt.min()), float(tt.max())] if len(tt) else None), open(fn + ".json", "w"), indent=1)
             print(f"saved {len(P)} points -> {fn}", flush=True)
         elif c == "still":
             threading.Thread(target=take_still, daemon=True).start()
@@ -224,7 +221,8 @@ try:
         cL = bin_raw10(bL, H=min(H, s.line_px), **kw); cR = bin_raw10(bR, H=min(H, s.line_px), **kw)
         Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
         Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
-        T = Tc @ Tt                                     # predicted MAP pose
+        T = Tt
+        if origin and n_frames % 2 == 0: origin.submit(cL, mL["pose"])
         if want_pt:                                     # depth-correct passthrough (STAGE frame, raw tracking pose)
             n_pt += 1
             ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt))
@@ -232,13 +230,8 @@ try:
             continue
         t2 = time.monotonic()
         with lock:
-            if a.align and not a.no_align and n_frames >= 3:
-                Ta, info = ts.align(ls, Z, T, tracking=Tt, abs_trans=a.abs_trans)
-                if Ta is not None:
-                    T = Ta; Tc = Ta @ np.linalg.inv(Tt)
             mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
-            ts.integrate(ls, Z, rgb, T, mask=mask)
-        write_align()
+            ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"])
         n_frames += 1; tst.append(t2 - t1); tfu.append(time.monotonic() - t2); t_fr.append(time.monotonic())
         if zf.poll() or time.monotonic() - t_pub > a.publish_every:
             t_pub = time.monotonic()

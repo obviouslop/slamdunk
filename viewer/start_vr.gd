@@ -31,11 +31,8 @@ func _ready() -> void:
 		# Make sure V-Sync is off, as V-Sync is handled by OpenXR.
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 
-		# Enable variable rate shading.
-		if RenderingServer.get_rendering_device():
-			vp.vrs_mode = Viewport.VRS_XR
-		elif int(ProjectSettings.get_setting("xr/openxr/foveation_level")) == 0:
-			push_warning("OpenXR: Recommend setting Foveation level to High in Project Settings")
+		# No variable rate shading / foveation: with foveated rendering the world scale and anchoring of the
+		# rendered content were wrong (verified 2026-11-20: foveation off fixes it).
 
 		# Connect the OpenXR events.
 		xr_interface.session_begun.connect(_on_openxr_session_begun)

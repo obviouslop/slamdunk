@@ -32,27 +32,3 @@ def run(noise, label, y0=0.0, jitter=0.0, **kw):
 for y0 in (0.0, 0.005, 0.01, 0.015):
     run(True, f"noisy y0={y0}", y0=y0)
 run(True, "noisy, pose jitter 1 deg/1 cm", jitter=1.0)
-
-# --- aligner bias on the synthetic floor (true offset 0)
-def frames(noise, k=60, seed=1):
-    rng = np.random.default_rng(seed); u, v = np.meshgrid(np.arange(n), np.arange(n)); out = []
-    for _ in range(k):
-        pitch = np.radians(rng.uniform(25, 70)); yaw = rng.uniform(0, 2 * np.pi)
-        pos = np.array([rng.uniform(-1, 1), 1.6, rng.uniform(-1, 1)])
-        fwd = np.array([np.cos(pitch) * np.sin(yaw), -np.sin(pitch), np.cos(pitch) * np.cos(yaw)])
-        right = np.cross(fwd, [0, 1, 0]); right /= np.linalg.norm(right); down = np.cross(fwd, right)
-        R = np.stack([right, down, fwd], 1)
-        d = np.stack([(u - n / 2) / ls.f, (v - n / 2) / ls.f, np.ones_like(u, float)], -1) @ R.T
-        Z = (-pos[1] / np.minimum(d[..., 1], -1e-6)).astype(np.float32); Z[(d[..., 1] >= -1e-3) | (Z > 4)] = 0
-        if noise:
-            sig = Z ** 2 / (ls.f * ls.baseline) * 0.35; Z = np.where(Z > 0, Z + rng.normal(0, 1, Z.shape) * sig, 0).astype(np.float32)
-        T = np.eye(4); T[:3, :3] = R; T[:3, 3] = pos; out.append((Z, T))
-    return out
-for noise in (False, True):
-    ts = TSDF(voxel=0.02, max_depth=2.5); dy = []
-    for j, (Z, T) in enumerate(frames(noise)):
-        if j >= 5:
-            Ta, info = ts.align(ls, Z, T, prior_rot=0.005, prior_trans=0.05)
-            if Ta is not None: dy.append(Ta[1, 3] - T[1, 3])
-        ts.integrate(ls, Z, np.full((n, n, 3), 128, np.uint8), T)
-    print(f"aligner on synthetic floor, noise={noise}: dy median {np.median(dy)*100:+.2f} cm (truth 0)")

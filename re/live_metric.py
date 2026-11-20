@@ -17,25 +17,16 @@ for v in sys.argv[2:]:
     kw = dict(voxel=0.02, max_depth=2.5)
     for item in v.split(",")[1:]:
         k, val = item.split("="); kw[k] = float(val)
-    mf = int(kw.pop("min_frames", 4)); al = kw.pop("align", 0); pr = kw.pop("prior_rot", 0.01); pt = kw.pop("prior_trans", 0.02); at = kw.pop("abs_trans", 0.15); ar = kw.pop("abs_rot", 0.03)
-    tsc = kw.pop("tscale", 1.0)                         # head-translation scale hypothesis: true = reported / tscale
-    Tsv = Ts.copy(); Tsv[:, :3, 3] /= tsc
+    mf = int(kw.pop("min_frames", 4)); 
     ts = TSDF(**kw)
-    D = []; npts = []; Tc = np.eye(4); corr = []
+    D = []; npts = []
     for j in range(len(Zs)):
         Zj = Zs[j].astype(np.float32)
-        Tg = Tc @ Tsv[j]                                   # map_from_stage (from earlier frames) applied to this pose
+        Tg = Ts[j]
         if j >= 20 and j % 6 == 0:                        # honest test: correction from frames < j only
             P, C, _ = ts.extract(min_frames=mf); npts.append(len(P))
             D.append(resid(P, Zj, Tg))
-        Ti = Tg
-        if al and j >= 3:
-            Ta, info = ts.align(ls, Zj, Tg, prior_rot=pr, prior_trans=pt, tracking=Ts[j], abs_rot=ar, abs_trans=at)
-            if Ta is not None:
-                Ti = Ta; Tc = Ta @ np.linalg.inv(Ts[j])
-        ph = Ts[j][:3, 3]; up = Tc[:3, :3] @ [0, 1, 0]
-        corr.append((np.linalg.norm(Tc[:3, :3] @ ph + Tc[:3, 3] - ph), np.degrees(np.arccos(np.clip(up[1], -1, 1))), np.degrees(np.arccos(np.clip((np.trace(Tc[:3, :3]) - 1) / 2, -1, 1)))))
-        ts.integrate(ls, Zj, Cs[j], Ti)
+        ts.integrate(ls, Zj, Cs[j], Tg)
     meds = [np.median(d) for d in D]; Dc = np.concatenate(D)
     print(f"{v:28s} bias median {np.median(Dc)*100:+.2f} cm  |d|<3cm {np.mean(np.abs(Dc)<0.03)*100:.1f}%  "
-          f"points {int(np.mean(npts))}  corr at head: max {max(c[0] for c in corr)*100:.1f} cm, final {corr[-1][0]*100:.1f} cm; tilt max {max(c[1] for c in corr):.2f} deg; rot final {corr[-1][2]:.2f} deg; final offset at head {np.round((Tc[:3,:3] @ Ts[-1][:3,3] + Tc[:3,3] - Ts[-1][:3,3])*100,1)} cm", flush=True)
+          f"points {int(np.mean(npts))}", flush=True)
