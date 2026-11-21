@@ -146,4 +146,11 @@ json.dump(dict(err_before_px=err0, err_after_px=err1, n_points=tri.num_points3D(
                gauge_trans_m=float(np.linalg.norm(ta)), centre_shift_cm_median=float(np.median(dc)),
                centre_shift_cm_max=float(dc.max()), rot_shift_deg_median=float(np.median(dr))),
           open(f"{out}/refine.json", "w"), indent=1)
+# refined sparse points in the STAGE frame (for plane/gravity checks)
+P = np.array([p.xyz for p in tri.points3D.values()]); Cc = np.array([p.color for p in tri.points3D.values()])
+P = (s * (Ra @ P.T)).T + ta
+with open(f"{out}/points_ba.ply", "w") as f:
+    f.write(f"ply\nformat ascii 1.0\nelement vertex {len(P)}\nproperty float x\nproperty float y\nproperty float z\n"
+            "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
+    for p, c in zip(P, Cc): f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {c[0]} {c[1]} {c[2]}\n")
 print("wrote", out)
