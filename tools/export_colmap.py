@@ -17,6 +17,7 @@ usage: export_colmap.py RECDIR OUTDIR [--ply fused.ply] [--fov 110] [--size 1600
 """
 import argparse, json, os, sys
 import numpy as np, cv2
+cv2.setNumThreads(int(os.environ.get("PC_EXPORT_THREADS", "0")))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from livestereo import LiveStereo, unpack_raw
 from stills import upright

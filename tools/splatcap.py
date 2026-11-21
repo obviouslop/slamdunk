@@ -39,8 +39,9 @@ class SplatCapture:
         if self.export is not None and self.export.poll() is None: return False
         out = self.last_dir.rstrip("/") + "_colmap"; here = os.path.dirname(os.path.abspath(__file__))
         log = open(self.last_dir.rstrip("/") + "_export.log", "w")
-        self.export = subprocess.Popen(["nice", "-n", "10", sys.executable, "-I", os.path.join(here, "export_colmap.py"), self.last_dir, out,
-                                        "--masks", "--depth", *extra], stdout=log, stderr=subprocess.STDOUT)
+        env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", PC_EXPORT_THREADS="1")   # leave the cores to the live pipeline
+        self.export = subprocess.Popen(["nice", "-n", "19", "ionice", "-c3", sys.executable, "-I", os.path.join(here, "export_colmap.py"), self.last_dir, out,
+                                        "--masks", "--depth", *extra], env=env, stdout=log, stderr=subprocess.STDOUT)
         self.export_out = out; self.export_msg = ""; print(f"splat export -> {out}", flush=True); return True
 
     def progress(self):
