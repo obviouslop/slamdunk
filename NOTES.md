@@ -805,3 +805,15 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   poses), pipeline.json (buffer manifest, stage timings, SGBM + rectification params, blur-gate decision, pcserver args) and
   preview/*.png. ~100 MB per capture. Replay test (live20): depth stage 172 ms, write ~0.9 s in a background thread.
   Under --replay the still's wall-clock name comes from the recording's timestamps (existing stills behaviour).
+
+## 2026-11-21: upright rectification, confidence threshold, tone curve
+- Rectified frame was rotated 180 deg (head-up pointed image-down, -179.6 deg) with camL as the right image -> LiveStereo now rotates
+  both rectified cameras 180 deg about z (R1/R2, P1/P2 cx/cy/Tx): images upright, camL left, no SGBM mirroring. Rectified images
+  are bit-identical 180-deg copies; SGBM_3WAY is scan-direction dependent (~20 % of disparities differ > 0.5 px when the same pair
+  is run upside down) but multi-view quality is identical (agree 0.455 / floaters 0.189 vs 0.455 / 0.188). PC_RECT_NO_ROTATE=1 = old.
+  Stills: rect/depth pages are upright now; their stage_from_rect / P1 metadata describe the new frame.
+- Floaters (re/filter_eval.py, live16/17/19/20, 40 pairs each; agree / floaters / agreeing points kept):
+  base 0.455/0.189/1.00, uniq 15 0.475/0.178/0.96, uniq 25 0.514/0.158/0.86, edge 5 % 0.518/0.156/0.87,
+  conf>=0.3 0.593/0.126/0.52, conf>=0.5 0.635/0.110/0.33. LiveStereo.confidence now measures texture on the MATCHER INPUT
+  (the colour-image version was ~0 indoors). pcserver --min-conf 0.3 (default) drops low-confidence pixels before TSDF.integrate.
+- Matcher tone curve: log default (re/tone_eval.py). Debug page: Bayer-coloured raw crop (PNG, 10-bit / 4).

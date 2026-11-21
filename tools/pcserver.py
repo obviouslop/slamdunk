@@ -55,6 +55,8 @@ ap.add_argument("--threads", type=int, default=3, help="OpenCV / TSDF worker thr
 ap.add_argument("--underfloor-cm", type=float, default=7.0, help="drop points more than this far below a FLAT floor (mirror images of windows in glossy floors); 0 = off")
 ap.add_argument("--occ-hz", type=float, default=15.0, help="max rate of the low-res occlusion depth frames")
 ap.add_argument("--conf", action="store_true", help="weight TSDF observations by per-pixel confidence (texture / depth-edge); A/B showed no gain on floor thickness, see re/test_conf.py")
+ap.add_argument("--min-conf", type=float, default=0.3, help="fuse only depth pixels with LiveStereo.confidence >= this (texture of the matcher input "
+                "x depth-edge); 0 = off. 0.3: floaters 0.189 -> 0.126, half the pixels per frame (re/filter_eval.py)")
 ap.add_argument("--sat", type=float, default=1.4, help="point colour saturation boost (1 = raw white-balanced sensor colours)")
 ap.add_argument("--color-gamma", type=float, default=1.0, help="point colour mid-tone lift: <1 brightens (e.g. 0.7)")
 ap.add_argument("--no-planes", action="store_true", help="no live coarse plane fitting (tools/planes.py, viewer PLANES toggle)")
@@ -400,6 +402,8 @@ try:
         if far is not None:
             far.enabled = bool(ctl.get("far", True)) if ctl else True
             far.offer(rgb, Z, T, mL["ts"], mL.get("exp_lines", 3000))
+        if a.min_conf > 0:                       # low-confidence pixels (no texture in the matcher input, flying pixels) -> not fused (far.offer above still sees all depth)
+            Z = np.where(ls.confidence(Z) >= a.min_conf, Z, 0).astype(np.float32)
         with lock:
             mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
             ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"], conf=ls.confidence(Z, rgb) if a.conf else None)

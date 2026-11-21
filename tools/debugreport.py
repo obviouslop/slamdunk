@@ -13,12 +13,13 @@ import cv2
 DARK = (24, 20, 20)
 
 
-def _w(pv, name, im, size=560, q=82):
+def _w(pv, name, im, size=560, q=82, png=False):
     if im.ndim == 2: im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
     h, w = im.shape[:2]; f = size / max(h, w)
     im = cv2.resize(im, (max(1, int(w * f)), max(1, int(h * f))), interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_NEAREST)
-    cv2.imwrite(os.path.join(pv, name + ".jpg"), im, [cv2.IMWRITE_JPEG_QUALITY, q])
-    return f"preview/{name}.jpg"
+    ext = ".png" if png else ".jpg"                   # PNG where per-pixel colour matters (JPEG subsamples chroma 2x2)
+    cv2.imwrite(os.path.join(pv, name + ext), im, [] if png else [cv2.IMWRITE_JPEG_QUALITY, q])
+    return f"preview/{name}{ext}"
 
 
 def _turbo(x, lo, hi, valid, inv=False):
@@ -30,8 +31,18 @@ def _raw_left(d, meta):
     raw = meta.get("raw", {}); W = raw.get("width", 2464); S = raw.get("line_bytes", 3088); skip = raw.get("skip_lines", 0)
     b = np.frombuffer(open(os.path.join(d, "left.y10p"), "rb").read(), np.uint8)[skip * S:]
     H = min(len(b) // S, W)
-    b = b[:H * S].reshape(H, S)[:, :W * 5 // 4].reshape(H, W // 4, 5)[:, :, :4].reshape(H, W)
-    return b.astype(np.float32)          # 8 MSBs of each 10-bit sample: enough for a picture
+    p = b[:H * S].reshape(H, S)[:, :W * 5 // 4].reshape(H, W // 4, 5).astype(np.uint16)
+    lo = p[:, :, 4]
+    return np.stack([(p[:, :, i] << 2) | ((lo >> (2 * i)) & 3) for i in range(4)], -1).reshape(H, W)   # full 10-bit samples
+
+
+def _bayer_rgb(raw10):
+    """RGGB mosaic -> BGR image where every sensor pixel shows only its own colour, brightness = 10-bit value / 4 (no gain)"""
+    v = (raw10 >> 2).astype(np.uint8); out = np.zeros(raw10.shape + (3,), np.uint8)
+    out[0::2, 0::2, 2] = v[0::2, 0::2]                                  # R
+    out[0::2, 1::2, 1] = v[0::2, 1::2]; out[1::2, 0::2, 1] = v[1::2, 0::2]   # G
+    out[1::2, 1::2, 0] = v[1::2, 1::2]                                  # B
+    return out
 
 
 def build(d):
@@ -44,10 +55,10 @@ def build(d):
     img = {}
     # 1 raw
     try:
-        raw = _raw_left(d, meta); c = raw.shape[0] // 2
-        img["raw_full"] = _w(pv, "raw_full", np.clip(255 * raw / max(np.percentile(raw, 99.5), 1), 0, 255).astype(np.uint8))
-        cr = raw[c - 48:c + 48, c - 48:c + 48]
-        img["raw_crop"] = _w(pv, "raw_crop", np.clip(255 * cr / max(np.percentile(cr, 99.5), 1), 0, 255).astype(np.uint8), size=288)
+        raw = _raw_left(d, meta); c = (raw.shape[0] // 2) & ~1                 # even offset: crop starts on an R pixel
+        rf = raw.astype(np.float32)
+        img["raw_full"] = _w(pv, "raw_full", np.clip(255 * rf / max(np.percentile(rf, 99.5), 1), 0, 255).astype(np.uint8))
+        img["raw_crop"] = _w(pv, "raw_crop", _bayer_rgb(raw[c - 48:c + 48, c - 48:c + 48]), size=288, png=True)
     except Exception:
         pass
     # 2 binned
@@ -125,7 +136,7 @@ def build(d):
     S = []
     S.append(stage(1, "Sensor: packed RAW10", "arcgrab → /dev/shm",
                    f"{e(meta.get('raw', {}).get('width', 2464))}² RGGB mosaic per camera, 5 bytes per 4 pixels. The crop shows the Bayer pattern at the centre.",
-                   ["<b>left.y10p</b>", "<b>right.y10p</b>"], [fig("raw_full", "left mosaic, sensor orientation"), fig("raw_crop", "96 × 96 px centre crop")]))
+                   ["<b>left.y10p</b>", "<b>right.y10p</b>"], [fig("raw_full", "left mosaic, sensor orientation"), fig("raw_crop", "96 × 96 px centre crop, each pixel in its filter colour, 10-bit / 4")]))
     S.append(stage(2, "bin_raw10: 2×2 binning demosaic", f"{tb:.1f} ms",
                    "Each RGGB cell becomes one BGR pixel, black level removed, float32. Shown white-balanced with gamma for viewing.",
                    [f"<b>binned_L/R</b> {A['binned_L'].shape[0]}² ×3 f32", "<b>wb</b> [" + ", ".join(f"{x:.2f}" for x in wb) + "]"],

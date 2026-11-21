@@ -49,6 +49,17 @@ class LiveStereo:
         n = int(2464 * scale); self.size = (n, n)
         R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(self.KL, self.DL, self.KR, self.DR, (2464, 2464), self.R, self.t.reshape(3, 1),
                                                       flags=cv2.CALIB_ZERO_DISPARITY, newImageSize=self.size, balance=0.0, fov_scale=1.0)
+        # The rig's rectified frame comes out rotated 180 deg about the optical axis (head-up points image-down, measured -179.6 deg)
+        # with camL as the RIGHT image of the pair. Rotating both rectified cameras by 180 deg about z makes the images upright AND
+        # puts camL on the left, so SGBM needs no mirroring. Pure relabelling of rectified pixels: u' = n-1-u, v' = n-1-v (depth unchanged).
+        self.upright = False
+        if P2[0, 3] > 0 and not os.environ.get("PC_RECT_NO_ROTATE"):
+            Rz = np.diag([-1.0, -1.0, 1.0]); n0 = n - 1
+            R1, R2 = Rz @ R1, Rz @ R2
+            P1, P2 = P1.copy(), P2.copy()
+            for P in (P1, P2): P[0, 2] = n0 - P[0, 2]; P[1, 2] = n0 - P[1, 2]
+            P2[0, 3] = -P2[0, 3]
+            self.upright = True
         self.R1, self.R2, self.P1, self.P2 = R1, R2, P1, P2
         # Source images are 2x2-binned (1232^2): binned pixel i covers full pixels 2i, 2i+1 -> centre 2i+0.5,
         # so K_half = K/2 with c_half = (c - 0.5)/2. Distortion is in normalised coordinates (unchanged).
@@ -93,6 +104,7 @@ class LiveStereo:
         rL = cv2.remap(g8L, *self.mapL, cv2.INTER_LINEAR)
         rR = cv2.remap(g8R, *self.mapR, cv2.INTER_LINEAR)
         rc = cv2.remap(cL, *self.mapL, cv2.INTER_LINEAR)
+        self._last_grey = rL                             # matcher input (tone-mapped), for confidence()
         mL, mR = (rL, rR) if self.left_first else (np.ascontiguousarray(rL[:, ::-1]), np.ascontiguousarray(rR[:, ::-1]))
         draw = self.sgbm.compute(mL, mR)                     # int16, 1/16 px, matcher orientation (mirrored if not left_first)
         disp = draw.astype(np.float32) / 16
@@ -175,22 +187,22 @@ class LiveStereo:
             self.debug.update(Z=np.ascontiguousarray(Z), rgb=np.ascontiguousarray(rgb), far=np.float32(far))
         return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
 
-    @staticmethod
-    def confidence(Z, rgb, g0=8.0, gmin=1.5, jump=0.04):
-        """Per-pixel measurement confidence 0..1 (LSD-SLAM style depth-hypothesis variance, cheap version).
-        Depth variance of a block-matching pixel is large where the image has little texture (the disparity is then
-        interpolated) and where the local depth jumps (flying pixels at occlusion edges / foreground fattening).
-          texture : mean |gradient| of the left image over 7x7 (grey levels) -> c_t = clip(g / g0, 0.15, 1), 0 below gmin
-          edge    : (max - min of Z over 3x3) / Z -> c_e = clip(1 - rel / jump, 0.1, 1)
-        -> float32 HxW (0 where Z invalid or the texture is below gmin: such pixels should not be integrated at all)."""
-        g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    def confidence(self, Z, rgb=None, g0=6.0, jump=0.04):
+        """Per-pixel measurement confidence 0..1 = texture x depth-edge term, for the depth Z of the LAST rectified() call.
+          texture : mean |gradient| over 7x7 of the MATCHER INPUT (tone-mapped grey, what SGBM actually saw) / g0 grey levels
+          edge    : 1 - (max - min of Z over 3x3) / Z / jump   (flying pixels at depth discontinuities)
+        Used as a hard threshold by pcserver --min-conf (re/filter_eval.py: conf >= 0.3 cut floaters 0.189 -> 0.126 and kept
+        52 % of the agreeing points per frame) and as TSDF weights with --conf. rgb is ignored (the old colour-based version was
+        ~0 in dark scenes); kept for call compatibility."""
+        g = getattr(self, "_last_grey", None)
+        if g is None or g.shape != Z.shape:
+            g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY) if rgb is not None else np.zeros(Z.shape, np.uint8)
+        g = g.astype(np.float32)
         gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3) * 0.125; gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3) * 0.125
-        tex = cv2.blur(np.hypot(gx, gy), (7, 7))
-        ct = np.clip(tex / g0, 0.15, 1.0); ct[tex < gmin] = 0
+        ct = np.clip(cv2.blur(np.hypot(gx, gy), (7, 7)) / g0, 0, 1)
         k = np.ones((3, 3), np.uint8)
         zmax = cv2.dilate(Z, k); zmin = cv2.erode(np.where(Z > 0, Z, 1e3).astype(np.float32), k)
-        rel = (zmax - np.minimum(zmin, zmax)) / np.maximum(Z, 1e-3)
-        ce = np.clip(1.0 - rel / jump, 0.1, 1.0)
+        ce = np.clip(1.0 - (zmax - np.minimum(zmin, zmax)) / np.maximum(Z, 1e-3) / jump, 0, 1)
         return np.where(Z > 0, ct * ce, 0).astype(np.float32)
 
     def debug_params(self):
@@ -203,7 +215,7 @@ class LiveStereo:
                               P1=g.getP1(), P2=g.getP2(), uniquenessRatio=g.getUniquenessRatio(), speckleWindowSize=g.getSpeckleWindowSize(),
                               speckleRange=g.getSpeckleRange(), disp12MaxDiff=g.getDisp12MaxDiff(), preFilterCap=g.getPreFilterCap(),
                               mode=int(g.getMode())),
-                    R1=self.R1.tolist(), R2=self.R2.tolist(), P1=self.P1.tolist(), P2=self.P2.tolist())
+                    upright=bool(self.upright), R1=self.R1.tolist(), R2=self.R2.tolist(), P1=self.P1.tolist(), P2=self.P2.tolist())
 
     def world_from_rect(self, hmd_pose_3x4):
         H = np.eye(4); H[:3, :] = np.asarray(hmd_pose_3x4); W = H @ self.head_from_camL
