@@ -781,3 +781,27 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   latest captures/splat/splat_<t> with --masks --depth -> splat_<t>_colmap/ (+ splat_<t>_export.log); the status line shows
   "export: running / done -> dir / FAILED". export_colmap without --ply now builds points3D from the stereo depth of the exported frames
   (4 cm voxels seen >= 2x), so a capture is self-contained. Viewer test needs /dev/shm/pointcloud.bin to exist (tile test).
+
+## Stereo matcher evaluation + motion-blur gate (2026-11-21, offline on the workstation)
+- tools/stereo_bench.py: scores matchers without ground truth (density, multi-view depth agreement within 3 % with neighbour
+  frames, floaters > 5 % in front). Inputs: an export_colmap dataset (1 fps live recs) or a rectified set from
+  tools/video_evalset.py (recorder video + avmeta.py metadata + re/fit_video_geom.py calib; 60 fps, scale 0.35, f 334 px).
+  Bench venv: `uv venv -p /usr/bin/python3 --system-site-packages .venv-bench` + numba.
+- 2026-11-07_12-37-04 recorder video (outdoor walk, 8 min): refit video geometry epipolar median 1.04 px, principal points
+  differ from captures/stereo_video_calib.json (12-47-24 fit) by ~20-25 px (pp vs toe angle trade off; not investigated).
+- Results, 360 pairs (6 x 2 s windows at 30 fps, neighbours 0.1 / 0.2 s), agree / floaters / density / ms (x86):
+  SGBM 0.631 / 0.111 / 0.57 / 28; SGBM+WLS (ximgproc) 0.730 / 0.072 / 0.50 / 54; BM+WLS 0.791 / 0.050 / 0.29 / 30;
+  census-SGM 8-path (numba) 0.554 / 0.137 / 0.46 / 196; per-tile disparity window from previous frame 0.619 / 0.118, work 0.76.
+  live17 (1 fps) gives the same ranking. -> edge-aware WLS filtering is the quality win; a narrowed window with OpenCV SGBM is not
+  (16-px granularity, tiles span depth jumps) - only worth it per pixel in a custom GPU SGM.
+- Blur estimate f*t_exp*(omega + v/2 m) predicts per-frame stereo agreement within every window (Spearman -0.33..-0.86);
+  in the one window with real blur (0.6-3.2 px) it tracks measured image sharpness (-0.76) and sharpness tracks agreement (+0.94).
+  Agreement by blur: <0.5 px 0.76, 0.5-1 0.74, 1-1.5 0.62, 1.5-2 0.46, 2-3 0.36. Below ~0.5 px the drop with omega is pose
+  error, not blur - the gate helps either way. pcserver --blur default 1.5 px (+ --blur-max-wait 1 s); rejects 3.6 % of this
+  outdoor recording (exposure 3-5 ms), many more indoors. Gate is untested live.
+- Debug capture (tools/debugcap.py): toolbox DEBUG CAP (row 8), viewer cmd `debug`, or `touch /dev/shm/pcdebug`. The next pair
+  pcserver processes (also when not scanning / blurred) is saved as a normal still (captures/stills/<time>/, same still.tiff) plus
+  pipeline.npz (28 buffers: binned, grey, remap maps, rectified, matcher in/out, disparity, Z, hand/cone masks, Z_fused, confidence,
+  poses), pipeline.json (buffer manifest, stage timings, SGBM + rectification params, blur-gate decision, pcserver args) and
+  preview/*.png. ~100 MB per capture. Replay test (live20): depth stage 172 ms, write ~0.9 s in a background thread.
+  Under --replay the still's wall-clock name comes from the recording's timestamps (existing stills behaviour).

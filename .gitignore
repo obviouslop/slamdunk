@@ -22,3 +22,4 @@ third_party/arcturus_sample/
 viewer/.godot/
 src/posestream
 viewer/override.cfg
+.venv-bench/
