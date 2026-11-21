@@ -240,6 +240,15 @@ def frame_points(i):
     fcache.clear(); fcache[i] = (Pw, hw); return fcache[i]
 
 
+def big_blobs(m, min_area, need_bottom=False):
+    """keep only connected components of bool mask m larger than min_area px (optionally: touching the bottom edge)"""
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    ok = np.zeros(n, bool)
+    for k in range(1, n):
+        if st[k, cv2.CC_STAT_AREA] >= min_area and (not need_bottom or st[k, cv2.CC_STAT_TOP] + st[k, cv2.CC_STAT_HEIGHT] >= m.shape[0] - 2): ok[k] = True
+    return ok[lab]
+
+
 def depth_and_mask(s, i, T):
     Pw, hw = frame_points(i); D = zbuf(Pw, T)
     if a.depth:
@@ -248,8 +257,10 @@ def depth_and_mask(s, i, T):
         ign = ~valid_fish[s]
         lower = np.zeros((NM, NM), bool); lower[NM // 2:] = True
         ign |= (D > 0) & (((D < a.near) & lower) | (D < 0.7 * a.near))                    # own body / legs / things at the lens
+        low = np.zeros((NM, NM), bool); low[int(NM * 0.6):] = True
+        ign |= big_blobs((D == 0) & low & valid_fish[s], 2000, need_bottom=True)           # no depth (too close) = legs / shoes at the bottom edge
         if map_pts is not None:
-            Dm = zbuf(map_pts, T); ign |= (D > 0) & (Dm > 0) & (D < Dm - a.static_margin)  # moved objects, people
+            Dm = zbuf(map_pts, T); ign |= big_blobs((D > 0) & (Dm > 0) & (D < Dm - a.static_margin), 2000)   # moved objects, people (large blobs only: stereo noise is blocky)
         if len(hw):
             Dh = zbuf(hw, T); ign |= cv2.dilate((Dh > 0).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
         ign = cv2.morphologyEx(ign.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))      # drop speckle
