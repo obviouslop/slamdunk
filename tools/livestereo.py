@@ -49,17 +49,12 @@ class LiveStereo:
         n = int(2464 * scale); self.size = (n, n)
         R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(self.KL, self.DL, self.KR, self.DR, (2464, 2464), self.R, self.t.reshape(3, 1),
                                                       flags=cv2.CALIB_ZERO_DISPARITY, newImageSize=self.size, balance=0.0, fov_scale=1.0)
-        # The rig's rectified frame comes out rotated 180 deg about the optical axis (head-up points image-down, measured -179.6 deg)
-        # with camL as the RIGHT image of the pair. Rotating both rectified cameras by 180 deg about z makes the images upright AND
-        # puts camL on the left, so SGBM needs no mirroring. Pure relabelling of rectified pixels: u' = n-1-u, v' = n-1-v (depth unchanged).
-        self.upright = False
-        if P2[0, 3] > 0 and not os.environ.get("PC_RECT_NO_ROTATE"):
-            Rz = np.diag([-1.0, -1.0, 1.0]); n0 = n - 1
-            R1, R2 = Rz @ R1, Rz @ R2
-            P1, P2 = P1.copy(), P2.copy()
-            for P in (P1, P2): P[0, 2] = n0 - P[0, 2]; P[1, 2] = n0 - P[1, 2]
+        # stereoRectify returns this rig upside down with camL as the right image. Flip both rectified cameras 180 deg about z
+        # (u' = n-1-u, v' = n-1-v): images upright, camL left, no mirroring for SGBM. A 0.4 deg roll remains: rows follow the baseline.
+        if P2[0, 3] > 0:
+            Rz = np.diag([-1.0, -1.0, 1.0]); R1, R2 = Rz @ R1, Rz @ R2; P1, P2 = P1.copy(), P2.copy()
+            for P in (P1, P2): P[0, 2] = n - 1 - P[0, 2]; P[1, 2] = n - 1 - P[1, 2]
             P2[0, 3] = -P2[0, 3]
-            self.upright = True
         self.R1, self.R2, self.P1, self.P2 = R1, R2, P1, P2
         # Source images are 2x2-binned (1232^2): binned pixel i covers full pixels 2i, 2i+1 -> centre 2i+0.5,
         # so K_half = K/2 with c_half = (c - 0.5)/2. Distortion is in normalised coordinates (unchanged).
@@ -215,7 +210,7 @@ class LiveStereo:
                               P1=g.getP1(), P2=g.getP2(), uniquenessRatio=g.getUniquenessRatio(), speckleWindowSize=g.getSpeckleWindowSize(),
                               speckleRange=g.getSpeckleRange(), disp12MaxDiff=g.getDisp12MaxDiff(), preFilterCap=g.getPreFilterCap(),
                               mode=int(g.getMode())),
-                    upright=bool(self.upright), R1=self.R1.tolist(), R2=self.R2.tolist(), P1=self.P1.tolist(), P2=self.P2.tolist())
+                    R1=self.R1.tolist(), R2=self.R2.tolist(), P1=self.P1.tolist(), P2=self.P2.tolist())
 
     def world_from_rect(self, hmd_pose_3x4):
         H = np.eye(4); H[:3, :] = np.asarray(hmd_pose_3x4); W = H @ self.head_from_camL

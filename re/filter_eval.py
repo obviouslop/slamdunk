@@ -3,7 +3,7 @@
 
     re/filter_eval.py [--n 40] captures/live16 captures/live17 ...
 
-Variants (all with the default log tone): orientation control (old upside-down rectification), SGBM uniqueness, a per-pixel
+Variants (all with the default log tone): SGBM uniqueness, a per-pixel
 confidence computed on the MATCHER INPUT (texture of the tone-mapped grey + local depth jump; LiveStereo.confidence uses the
 dark colour image and is ~0 indoors), thresholded, and the flying-pixel edge filter. Prints agree / floaters / density and the
 share of the base's agreeing points that each variant keeps.
@@ -36,15 +36,14 @@ def edge_filter(Z, rel=0.05):
     return np.where((Z > 0) & ((zmax - np.minimum(zmin, zmax)) < rel * Z), Z, 0)
 
 
-VARIANTS = {   # name: (env PC_RECT_NO_ROTATE, LiveStereo kwargs, post filter(Z, debug) -> Z)
-    "base (upright)":        (False, {}, None),
-    "old upside-down":       (True, {}, None),
-    "uniq 15":               (False, dict(uniq=15), None),
-    "uniq 25":               (False, dict(uniq=25), None),
-    "conf >= 0.3":           (False, {}, lambda Z, D: np.where(conf_matcher(D["rect_grey_L"], Z) >= 0.3, Z, 0)),
-    "conf >= 0.5":           (False, {}, lambda Z, D: np.where(conf_matcher(D["rect_grey_L"], Z) >= 0.5, Z, 0)),
-    "edge 5 %":              (False, {}, lambda Z, D: edge_filter(Z, 0.05)),
-    "uniq 15 + conf >= 0.3": (False, dict(uniq=15), lambda Z, D: np.where(conf_matcher(D["rect_grey_L"], Z) >= 0.3, Z, 0)),
+VARIANTS = {   # name: (LiveStereo kwargs, post filter(Z, debug) -> Z)
+    "base":                  ({}, None),
+    "uniq 15":               (dict(uniq=15), None),
+    "uniq 25":               (dict(uniq=25), None),
+    "conf >= 0.3":           ({}, lambda Z, D: np.where(conf_matcher(D["rect_grey_L"], Z) >= 0.3, Z, 0)),
+    "conf >= 0.5":           ({}, lambda Z, D: np.where(conf_matcher(D["rect_grey_L"], Z) >= 0.5, Z, 0)),
+    "edge 5 %":              ({}, lambda Z, D: edge_filter(Z, 0.05)),
+    "uniq 15 + conf >= 0.3": (dict(uniq=15), lambda Z, D: np.where(conf_matcher(D["rect_grey_L"], Z) >= 0.3, Z, 0)),
 }
 
 
@@ -78,9 +77,7 @@ for d in a.recs:
             b = open(os.path.join(d, f"{r['i']:05d}_{s}.y10p"), "rb").read()
             c.append(bin_raw10(b, H=min(len(b) // kw["stride"] - kw["skip"], kw["W"]), **kw))
         pairs.append(c)
-    for name, (norot, kwa, post) in VARIANTS.items():
-        if norot: os.environ["PC_RECT_NO_ROTATE"] = "1"
-        else: os.environ.pop("PC_RECT_NO_ROTATE", None)
+    for name, (kwa, post) in VARIANTS.items():
         ls = livestereo.LiveStereo(scale=a.scale, **kwa); Zs, Ts = [], []
         for k, (cL, cR) in enumerate(pairs):
             ls.debug = {}; Z, _, _ = ls.depth(cL, cR, far=4.0, half=True)
@@ -89,8 +86,7 @@ for d in a.recs:
         ag, fo, n = score(ls, Zs, Ts); dens = float(np.mean([(Z > 0).mean() for Z in Zs]))
         tot[name] += [ag, fo, n, dens * len(Zs)]
         print(f"{os.path.basename(d):7s} {name:22s} density {dens:.3f}  agree {ag / max(n, 1):.3f}  floaters {fo / max(n, 1):.3f}", flush=True)
-os.environ.pop("PC_RECT_NO_ROTATE", None)
-base = tot["base (upright)"]
+base = tot["base"]
 print("ALL (kept = agreeing points relative to base)")
 for name, (ag, fo, n, _) in tot.items():
     print(f"  {name:22s} agree {ag / max(n, 1):.3f}  floaters {fo / max(n, 1):.3f}  kept {ag / max(base[0], 1):.2f}")
