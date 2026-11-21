@@ -32,7 +32,8 @@ import handmask
 import floor as floormod
 import fiducials
 from origin import OriginTracker
-from farstereo import FarStereo
+from farstereo import FarStereo, LT, _rot_angle
+import debugcap
 from tags import TagWatcher
 from planes import PlaneTracker
 from splatcap import SplatCapture
@@ -65,6 +66,9 @@ ap.add_argument("--no-far", action="store_true", help="no wide-baseline far-rang
 ap.add_argument("--far-mb", type=float, default=100.0, help="size of the on-disk keyframe ring buffer for the far-range depth (MB)")
 ap.add_argument("--far-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "scratch", "far"))
 ap.add_argument("--far-blur", type=float, default=1.0, help="keyframes only below this estimated motion blur (px)")
+ap.add_argument("--blur", type=float, default=1.5, help="fuse only pairs whose estimated motion blur (px, rectified image; f*t_exp*(omega+v/z) "
+                "from the tracked pose change between frames) is below this; 0 = off (evaluation: NOTES.md 2026-11-21)")
+ap.add_argument("--blur-max-wait", type=float, default=1.0, help="after this many s without a sharp pair, fuse the next one anyway")
 ap.add_argument("--far-zmin", type=float, default=2.5, help="far points start at this range (m)")
 ap.add_argument("--no-handmask", action="store_true", help="do not keep hands / controllers out of the fused cloud")
 ap.add_argument("--no-origin", action="store_true", help="do not look for the origin marker (AprilTag 41h12 id 4)")
@@ -229,6 +233,7 @@ threading.Thread(target=pick_loop, daemon=True).start()
 last_cmd_seq = None; scan = "auto"; saved = ""; still = ""; n_stills = 0
 last_frame = -1; n_pt = 0; t_frame_status = 0.0; t_pub = 0; n_frames = 0; t0 = time.monotonic(); tst = []; tfu = []; t_fr = []
 npub = 0
+prev_pose = None; z_med = 1.5; t_last_fused = 0.0; n_blurry = 0
 print(f"pcserver: scale {a.scale} ({ls.size[0]} px), voxel {a.voxel*100:.1f} cm, min frames {a.min_frames}, "
       f"depth {a.min_depth}-{a.maxdepth} m", flush=True)
 
@@ -243,9 +248,23 @@ def take_still():
     write_status()
 
 
+dbg_state = {"armed": False, "last": "", "n": 0}
+DEBUG_TRIGGER = f"{SHM}/pcdebug"      # `touch /dev/shm/pcdebug` arms a debug capture without the viewer
+
+
+def take_debug(pair, bufs, info):
+    try:
+        dbg_state["last"] = debugcap.save(s, ls, pair, bufs, info); dbg_state["n"] += 1
+        print(f"debug capture -> {dbg_state['last']}", flush=True)
+    except Exception as e:
+        dbg_state["last"] = f"failed: {e}"; print("debug capture failed:", e, flush=True)
+    write_status()
+
+
 def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
                                  scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame,
+                                 debug=dbg_state["last"], debugs=dbg_state["n"],
                                  origin=origin.hud() if origin else "", far=far.hud() if far else "",
                                  splat=splatcap.hud() if splatcap else "", splat_on=bool(splatcap and splatcap.enabled), splat_dir=(splatcap.dir or "") if splatcap else "", splat_n=splatcap.n if splatcap else 0,
                                  splat_prog=(-1.0 if not splatcap or splatcap.export is None else (splatcap.progress() if splatcap.export.poll() is None else 1.0)) if splatcap else -1.0))
@@ -281,6 +300,8 @@ def handle_cmd(ctl):
             if splatcap: splatcap.start_export()
         elif c == "still":
             threading.Thread(target=take_still, daemon=True).start()
+        elif c == "debug":
+            dbg_state["armed"] = True; print("debug capture armed (next processed pair)", flush=True)
     last_cmd_seq = ctl.get("cmd_seq")
 
 
@@ -297,7 +318,12 @@ try:
         tagwatch.enabled = bool(ctl and ctl.get("tags"))
         planes_state["on"] = bool(ctl and ctl.get("planes"))
         if splatcap: splatcap.enabled = bool(ctl and ctl.get("splat")) and splatcap.bytes < splatcap.max_bytes
-        if not fuse and not want_view and not tagwatch.enabled:
+        if os.path.exists(DEBUG_TRIGGER):
+            try: os.remove(DEBUG_TRIGGER)
+            except OSError: pass
+            dbg_state["armed"] = True; print("debug capture armed (trigger file)", flush=True)
+        dbg = dbg_state["armed"]                 # debug capture: process the next pair even if nothing else needs it
+        if not fuse and not want_view and not tagwatch.enabled and not dbg:
             time.sleep(0.03)                  # idle, keep polling the viewer for commands
             if zf.poll():                     # zones edited while not scanning: show the result right away
                 npub = publish_cloud(); print(f"zones: {len(zf.zones)} -> {npub} points", flush=True)
@@ -315,12 +341,32 @@ try:
             t_frame_status = time.monotonic(); write_status()
         if not mL["pose_valid"] or abs(mL["ts"] - mR["ts"]) > a.pair_tol:
             continue
+        # motion-blur gate (pose velocities only, before any image work): blurred pairs are not fused
+        Tcur = np.eye(4); Tcur[:3, :] = np.asarray(mL["pose"]); blur = 0.0; om = v = 0.0
+        if prev_pose is not None and 1e-3 < mL["ts"] - prev_pose[1] < 0.2:
+            dtp = mL["ts"] - prev_pose[1]
+            om = np.radians(_rot_angle(prev_pose[0][:3, :3].T @ Tcur[:3, :3])) / dtp
+            v = np.linalg.norm(Tcur[:3, 3] - prev_pose[0][:3, 3]) / dtp
+            blur = ls.f * mL.get("exp_lines", 3000) * LT * (om + v / max(z_med, 0.5))
+        prev_pose = (Tcur, mL["ts"])
+        sharp = a.blur <= 0 or blur <= a.blur or time.monotonic() - t_last_fused > a.blur_max_wait
+        if not sharp:
+            n_blurry += 1
+            if not want_view and not tagwatch.enabled and not dbg:
+                continue                      # nothing else needs this pair: skip the stereo entirely
+        fuse = fuse and sharp
+        if dbg:
+            dbg_state["armed"] = False; ls.debug = {}; tdb = {}
         t1 = time.monotonic()
         kw = dict(W=s.line_px, stride=s.line_bytes, skip=s.skip, black=float(s.black), threads=a.threads)
         H = (min(len(bL), len(bR)) // s.line_bytes) - s.skip
         cL = bin_raw10(bL, H=min(H, s.line_px), **kw); cR = bin_raw10(bR, H=min(H, s.line_px), **kw)
         Tt = ls.world_from_rect(mL["pose"])            # tracking (STAGE)
+        if dbg: tdb["bin_raw10"] = time.monotonic() - t1
         Z, rgb, _ = ls.depth(cL, cR, far=a.carve_depth, half=True)
+        if dbg: tdb["depth"] = time.monotonic() - t1 - tdb["bin_raw10"]; dbuf = ls.debug; ls.debug = None
+        zv = Z[::8, ::8]; zv = zv[zv > 0]
+        if len(zv): z_med = float(np.median(zv))
         T = Tt
         if a.apply_origin_corr and origin:
             Cc = origin.correction_now()
@@ -329,9 +375,23 @@ try:
         if want_view:                                   # depth-correct passthrough (STAGE frame, raw tracking pose)
             n_pt += 1
             ptpub.publish(ptpub.pack(Z, rgb, ls.f, ls.P1[0, 2], ls.P1[1, 2], Tt, mL["ts"], mL["frame"], n_pt))
+        def debug_out(Zf, hm, mask):
+            info = dict(timings_ms={k: round(x * 1000, 2) for k, x in tdb.items()}, far_m=float(a.carve_depth), fused=Zf is not None,
+                        scan=scan, frame_left=mL["frame"], frame_right=mR["frame"], ts_left=mL["ts"], ts_right=mR["ts"],
+                        blur_gate=dict(blur_px=float(blur), omega_rad_s=float(om), v_m_s=float(v), z_med_m=float(z_med), threshold_px=a.blur,
+                                       sharp=bool(sharp), skipped_so_far=n_blurry),
+                        pcserver_args=vars(a))
+            bufs = dict(dbuf, rgb_R=ls.rectified_rgb_pair(cL, cR, half=True)[1],
+                        hand_mask=hm if hm is not None else np.zeros(Z.shape, bool),
+                        cone_mask=mask if mask is not None else np.ones(Z.shape, bool),
+                        Z_fused=Zf if Zf is not None else np.zeros_like(Z), conf=ls.confidence(dbuf["Z"], dbuf["rgb"]),
+                        stage_from_rect_tracked=Tt, stage_from_rect_used=T)
+            threading.Thread(target=take_debug, args=((mL, bL, mR, bR), bufs, info), daemon=True).start()
         if not fuse:
+            if dbg: debug_out(None, None, None)
             continue
         t2 = time.monotonic()
+        hm = None
         if not a.no_handmask and ctl and ctl.get("hands"):        # controllers + the hands holding them stay out of the map
             hp = [(h[3], h[7], h[11]) for h in ctl["hands"] if len(h) == 12]
             hm = handmask.hand_mask(Z, np.linalg.inv(Tt), ls.f, ls.P1[0, 2], ls.P1[1, 2], hp)
@@ -342,6 +402,9 @@ try:
         with lock:
             mask = cone_pixels(ls, Z, T, to_map(ctl["aim"]).ravel().tolist(), a.cone) if scan == "paint" else None
             ts.integrate(ls, Z, rgb, T, mask=mask, t=mL["ts"], conf=ls.confidence(Z, rgb) if a.conf else None)
+        t_last_fused = time.monotonic()
+        if dbg:
+            tdb["handmask_far_integrate"] = time.monotonic() - t2; debug_out(Z, hm, mask)
         n_frames += 1; tst.append(t2 - t1); tfu.append(time.monotonic() - t2); t_fr.append(time.monotonic())
         if zf.poll() or time.monotonic() - t_pub > a.publish_every:
             t_pub = time.monotonic()
@@ -350,6 +413,6 @@ try:
             last_fps = fps; write_status(fps)
             print(f"frame {last_frame}: {n_frames} fused ({fps:.1f}/s), stereo {np.mean(tst[-10:])*1000:.0f} ms, "
                   f"tsdf {np.mean(tfu[-10:])*1000:.0f} ms, publish {(time.monotonic()-t_pub)*1000:.0f} ms, "
-                  f"{ts.nblocks} blocks, {npub} points, scan {scan}", flush=True)
+                  f"{ts.nblocks} blocks, {npub} points, scan {scan}, blurry skipped {n_blurry}", flush=True)
 finally:
     stop = True

@@ -148,6 +148,8 @@ var pal_hit = null           # palette hit of the right ray this frame
 var analog := {}             # hand/action -> pressed state for float-derived buttons
 var last_stills := -1
 var still_pending_ms := -1
+var last_debugs := -1
+var debug_pending_ms := -1
 var profile := ""
 var help_touched := false     # user toggled help -> no auto-hide
 var input_log: Array = []     # last input events (shown in the help panel, printed to the log)
@@ -316,6 +318,7 @@ func _build_scene() -> void:
 	palette.add_button("planes", "PLANES", 2, 7)
 	palette.add_button("splat", "◉ SPLAT", 3, 7)
 	palette.add_button("splat_export", "EXPORT SPLAT", 3, 8)
+	palette.add_button("debug", "DEBUG CAP", 2, 8)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -570,6 +573,10 @@ func _on_palette(id: String) -> void:
 			_toggle_scan()
 		"still":
 			_still()
+		"debug":
+			_send_cmd("debug")
+			debug_pending_ms = Time.get_ticks_msec()
+			_say("debug capture: next frame ...")
 		"save":
 			_save()
 		"help":
@@ -1102,6 +1109,15 @@ func _process(delta: float) -> void:
 		palette.set_text("splat_export", "EXPORT %d%%" % int(sp * 100) if sp >= 0.0 and sp < 1.0 else "EXPORT SPLAT")
 		gnss = _read_json(GNSS_PATH)
 		georef = _read_json(GEOREF_PATH)
+		var nd := int(srv.get("debugs", 0))
+		if debug_pending_ms >= 0 and nd != last_debugs and last_debugs >= 0:
+			_say("debug capture saved: " + String(srv.get("debug", "")).get_file())
+			_buzz("right_hand", 0.3, 0.03)
+			debug_pending_ms = -1
+		elif debug_pending_ms >= 0 and Time.get_ticks_msec() - debug_pending_ms > 8000:
+			_say("debug capture: no answer (scanning paused? pcserver running?)")
+			debug_pending_ms = -1
+		last_debugs = nd
 		var n := int(srv.get("stills", 0))
 		if still_pending_ms >= 0 and n != last_stills and last_stills >= 0:
 			_say("still saved: " + String(srv.get("still", "")).get_file())

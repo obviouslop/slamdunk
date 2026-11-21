@@ -71,6 +71,7 @@ class LiveStereo:
                                           uniquenessRatio=uniq, speckleWindowSize=100, speckleRange=2, disp12MaxDiff=1,
                                           mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
         u, v = np.meshgrid(np.arange(n), np.arange(n)); self.uv = (u - P1[0, 2], v - P1[1, 2])
+        self.debug = None   # set to a dict: the next rectified()/depth() call stores its intermediate buffers there (debug capture)
 
     @staticmethod
     def _rgb(raw):
@@ -90,13 +91,20 @@ class LiveStereo:
         rL = cv2.remap(np.clip(gL * s, 0, 255).astype(np.uint8), *self.mapL, cv2.INTER_LINEAR)
         rR = cv2.remap(np.clip(gR * s, 0, 255).astype(np.uint8), *self.mapR, cv2.INTER_LINEAR)
         rc = cv2.remap(cL, *self.mapL, cv2.INTER_LINEAR)
-        if self.left_first:
-            disp = self.sgbm.compute(rL, rR).astype(np.float32) / 16
-        else:   # camL is the right image of the rectified pair: mirror both so it becomes the left one
-            disp = self.sgbm.compute(np.ascontiguousarray(rL[:, ::-1]), np.ascontiguousarray(rR[:, ::-1])).astype(np.float32)[:, ::-1] / 16
+        mL, mR = (rL, rR) if self.left_first else (np.ascontiguousarray(rL[:, ::-1]), np.ascontiguousarray(rR[:, ::-1]))
+        draw = self.sgbm.compute(mL, mR)                     # int16, 1/16 px, matcher orientation (mirrored if not left_first)
+        disp = draw.astype(np.float32) / 16
+        if not self.left_first:   # camL is the right image of the rectified pair: both were mirrored so it became the left one
+            disp = disp[:, ::-1]
+        disp_sgbm = disp
         if self.median:
             dm = cv2.medianBlur(disp, self.median)          # suppress isolated noisy matches
             disp = np.where(np.abs(dm - disp) < 1.0, disp, -1)
+        if self.debug is not None:
+            self.debug.update(binned_L=cL, binned_R=cR, wb=np.asarray(wb, np.float32), grey_gain=np.float32(s),
+                              grey_L=np.clip(gL * s, 0, 255).astype(np.uint8), grey_R=np.clip(gR * s, 0, 255).astype(np.uint8),
+                              rect_grey_L=rL, rect_grey_R=rR, matcher_in_L=mL, matcher_in_R=mR, matcher_out_int16=draw,
+                              disp_sgbm=np.ascontiguousarray(disp_sgbm), disp=np.ascontiguousarray(disp), rect_colour_raw=rc)
         return disp, rc, wb, s
 
     def rectified_rgb_pair(self, rawL, rawR, half=False):
@@ -137,6 +145,8 @@ class LiveStereo:
         x += np.maximum(x.max(-1, keepdims=True) - 255, 0)
         x[rc.max(-1) > 0.97 * (1023 - 64)] = 255
         rgb = self.finish(x)[:, :, ::-1]
+        if self.debug is not None:
+            self.debug.update(Z=np.ascontiguousarray(Z), rgb=np.ascontiguousarray(rgb), far=np.float32(far))
         return np.ascontiguousarray(Z), np.ascontiguousarray(rgb), disp
 
     @staticmethod
@@ -156,6 +166,18 @@ class LiveStereo:
         rel = (zmax - np.minimum(zmin, zmax)) / np.maximum(Z, 1e-3)
         ce = np.clip(1.0 - rel / jump, 0.1, 1.0)
         return np.where(Z > 0, ct * ce, 0).astype(np.float32)
+
+    def debug_params(self):
+        """matcher / rectification parameters for a debug capture (JSON-able)"""
+        g = self.sgbm
+        return dict(scale_size=list(self.size), f=float(self.f), baseline_m=float(self.baseline), left_first=bool(self.left_first),
+                    k=float(self.k), d0_px=float(self.d0), min_depth=float(self.min_depth), max_depth=float(self.max_depth),
+                    median=int(self.median), edge_rel=float(self.edge_rel), sat=float(self.sat), gamma=float(self.gamma),
+                    sgbm=dict(minDisparity=g.getMinDisparity(), numDisparities=g.getNumDisparities(), blockSize=g.getBlockSize(),
+                              P1=g.getP1(), P2=g.getP2(), uniquenessRatio=g.getUniquenessRatio(), speckleWindowSize=g.getSpeckleWindowSize(),
+                              speckleRange=g.getSpeckleRange(), disp12MaxDiff=g.getDisp12MaxDiff(), preFilterCap=g.getPreFilterCap(),
+                              mode=int(g.getMode())),
+                    R1=self.R1.tolist(), R2=self.R2.tolist(), P1=self.P1.tolist(), P2=self.P2.tolist())
 
     def world_from_rect(self, hmd_pose_3x4):
         H = np.eye(4); H[:3, :] = np.asarray(hmd_pose_3x4); W = H @ self.head_from_camL

@@ -227,18 +227,22 @@ def _append_composited(d, tiff_path, t_trigger, ready, meta):
 # ------------------------------------------------------------------ capture
 
 def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_path="/dev/shm/georef.json",
-               pair_tol=0.015, timeout=2.0, composited=True):
+               pair_tol=0.015, timeout=2.0, composited=True, pair=None, depth=None):
     """Grab the newest synchronised pair from ArcShm `shm` and write a still directory with still.tiff. Returns its path.
-    The stereo frames are taken first (small capture delay); everything else, incl. the composited view, follows."""
+    The stereo frames are taken first (small capture delay); everything else, incl. the composited view, follows.
+    pair = (mL, bL, mR, bR): use this already grabbed pair instead (debug capture: the pair pcserver just processed);
+    depth = (Z, rgbL, rgbR): its already computed depth page instead of recomputing it."""
     import threading
     from tsdf import bin_raw10
     t_wall = time.time()
     t_end = time.monotonic() + timeout
-    while True:
+    while pair is None:
         mL, bL = shm.latest_packed(0, timeout=timeout)
         mR, bR = shm.latest_packed(1, after_frame=mL["frame"] - 2, timeout=timeout)
         if abs(mL["ts"] - mR["ts"]) <= pair_tol or time.monotonic() > t_end:
             break
+    if pair is not None:
+        mL, bL, mR, bR = pair
     ready = threading.Event(); meta = {}
     # wall-clock time of the exposure: shift "now" by the monotonic age of the frame
     age = time.monotonic() - mL["ts"]
@@ -309,8 +313,11 @@ def save_still(shm, ls, out_root=OUT, gnss_path="/dev/shm/gnss.json", georef_pat
     kw = dict(W=shm.line_px, stride=shm.line_bytes, skip=shm.skip, black=float(shm.black), threads=2)
     Hh = min(len(bL) // shm.line_bytes - shm.skip, shm.line_px)
     cLh, cRh = bin_raw10(bL, H=Hh, **kw), bin_raw10(bR, H=Hh, **kw)
-    Z, _, _ = ls.depth(cLh, cRh, far=4.0, half=True)
-    rgbL, rgbR = ls.rectified_rgb_pair(cLh, cRh, half=True)
+    if depth is not None:
+        Z, rgbL, rgbR = depth
+    else:
+        Z, _, _ = ls.depth(cLh, cRh, far=4.0, half=True)
+        rgbL, rgbR = ls.rectified_rgb_pair(cLh, cRh, half=True)
     Wr = ls.world_from_rect(mL["pose"])
     geom = {"intrinsics_rect": {"f": float(ls.f), "cx": float(ls.P1[0, 2]), "cy": float(ls.P1[1, 2]), "size": list(ls.size)},
             "stage_from_rect": Wr.tolist(), "rect_axes": "OpenCV (x right, y down, z forward)", "baseline_m": float(ls.baseline),
