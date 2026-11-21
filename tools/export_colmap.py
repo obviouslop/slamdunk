@@ -28,7 +28,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument("rec"); ap.add_argument("out")
 ap.add_argument("--ply"); ap.add_argument("--fov", type=float, default=110.0); ap.add_argument("--size", type=int, default=1600)
 ap.add_argument("--target", type=int, default=300, help="about this many images, chosen for even spatial coverage"); ap.add_argument("--density", type=float, default=1.0, help="0 = uniform coverage, 1 = denser where there are more features / more time spent")
-ap.add_argument("--blur-pct", type=float, default=15.0)
+ap.add_argument("--blur-pct", type=float, default=15.0, help="fallback only (no pose-based blur available): drop the blurriest % by Laplacian")
+ap.add_argument("--max-blur", type=float, default=0.75, help="drop images whose estimated motion blur at the export pinhole exceeds this (px); "
+                "from frames.jsonl blur_px (splat captures) or the 500 Hz pose log (live recordings)")
 ap.add_argument("--masks", action="store_true", help="masks/<image>.png (255 keep, 0 ignore): fisheye border, own body / near things, dynamic objects vs the static map, controllers")
 ap.add_argument("--depth", action="store_true", help="depth/<image>.png 16-bit mm (800x800, 0 invalid) from the stereo depth of the same frame")
 ap.add_argument("--near", type=float, default=0.55, help="masks: ignore anything nearer than this (m) in the lower image half, and nearer than 0.7x this anywhere")
@@ -102,9 +104,37 @@ for ci, (s, i, m) in enumerate(cand):
     g = np.sqrt(np.clip(g / max(np.percentile(g, 99), 1e-9), 0, 1)).astype(np.float32)
     score[(s, i)] = cv2.Laplacian(g, cv2.CV_32F).var()
     feat[(s, i)] = len(fast.detect((g * 255).astype(np.uint8), None))
-thr = np.percentile(list(score.values()), a.blur_pct)
-pool = [(s, i, m, cam_pose(s, m)) for s, i, m in cand if score[(s, i)] >= thr]            # drop the blurriest
-print(f"{len(pool)} sharp enough (blur threshold {thr:.2e})")
+# motion blur from the poses (image sharpness scores fail under high-gain noise, re/blur_vs_sharp.py):
+#   splat captures log blur_px per pair; live recordings have the 500 Hz HMD pose log
+f_exp = (a.size / 2) / np.tan(np.radians(a.fov / 2)); blur = {}
+by_i = {r["i"]: r for r in recs}
+hlog = os.path.join(a.rec, "hmd_500hz.txt")
+Hl = None
+if os.path.exists(hlog):
+    Hl = np.loadtxt(hlog); Hl = Hl[Hl[:, 1] > 0]
+for s, i, m in cand:
+    r = by_i.get(i, {})
+    te = m["exp_lines"] * 4.36e-6
+    if "blur_px" in r:
+        blur[(s, i)] = r["blur_px"] * f_exp / (800 / np.tan(np.radians(55)))
+    elif Hl is not None:
+        k = np.searchsorted(Hl[:, 0], [m["ts"] - te / 2 - 0.004, m["ts"] + te / 2 + 0.004])
+        if k[1] < len(Hl) and k[1] - k[0] >= 2:
+            qa, qb = Hl[k[0]], Hl[k[1]]
+            def qR(q):
+                w, x, y, z = q / np.linalg.norm(q)
+                return np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)], [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)], [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
+            dt = qb[0] - qa[0]
+            om = np.linalg.norm(cv2.Rodrigues(qR(qa[2:6]).T @ qR(qb[2:6]))[0]) / dt; v = np.linalg.norm(qb[6:9] - qa[6:9]) / dt
+            blur[(s, i)] = f_exp * te * (om + v / 1.5)
+if len(blur) >= 0.8 * len(cand):
+    pool = [(s, i, m, cam_pose(s, m)) for s, i, m in cand if blur.get((s, i), 1e9) <= a.max_blur]
+    for s, i, *_ in pool: score[(s, i)] = -blur[(s, i)]                       # greedy selection prefers the least blurred
+    print(f"{len(pool)} sharp enough (pose-based motion blur <= {a.max_blur} px; median of all {np.median(list(blur.values())):.2f} px)")
+else:
+    thr = np.percentile(list(score.values()), a.blur_pct)
+    pool = [(s, i, m, cam_pose(s, m)) for s, i, m in cand if score[(s, i)] >= thr]            # drop the blurriest
+    print(f"{len(pool)} sharp enough (no pose-based blur: Laplacian threshold {thr:.2e}, weak under high gain)")
 
 # 2) spatial selection: view distance = |d position| + W * angle (W metres per radian); greedy in order of sharpness, an image
 #    is kept when no kept image is closer than its own radius r_i = r0 / density_i. density_i grows with feature richness and
@@ -257,9 +287,15 @@ def depth_and_mask(s, i, T):
     if a.masks:
         ign = ~valid_fish[s]
         lower = np.zeros((NM, NM), bool); lower[NM // 2:] = True
-        ign |= (D > 0) & (((D < a.near) & lower) | (D < 0.7 * a.near))                    # own body / legs / things at the lens
+        # own body / legs / things at the lens; blobs > 2000 px only (single blocks are stereo noise, e.g. on a plain ceiling)
+        ign |= big_blobs((D > 0) & (((D < a.near) & lower) | (D < 0.7 * a.near)), 2000)
+        # no depth (too close to match) at the bottom edge = legs / shoes. ONLY inside the stereo footprint: the reprojected depth
+        # covers ~half of the image (rectified-left overlap), and outside it D == 0 says nothing (this masked the whole lower 40 %).
+        cov = np.zeros((NM, NM), np.uint8)
+        pts = cv2.findNonZero((D > 0).astype(np.uint8))
+        if pts is not None and len(pts) > 100: cv2.fillConvexPoly(cov, cv2.convexHull(pts), 1)
         low = np.zeros((NM, NM), bool); low[int(NM * 0.6):] = True
-        ign |= big_blobs((D == 0) & low & valid_fish[s], 2000, need_bottom=True)           # no depth (too close) = legs / shoes at the bottom edge
+        ign |= big_blobs((D == 0) & low & valid_fish[s] & (cov > 0), 2000, need_bottom=True)
         if map_pts is not None:
             Dm = zbuf(map_pts, T); ign |= big_blobs((D > 0) & (Dm > 0) & (D < Dm - a.static_margin), 2000)   # moved objects, people (large blobs only: stereo noise is blocky)
         if len(hw):

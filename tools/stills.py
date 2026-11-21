@@ -192,12 +192,20 @@ def composited_frame(t_after, timeout=4.0, tmp_dir=None, device="/dev/video99"):
                 if b[-2:] == b"\xff\xd9": return b, "record:" + os.path.basename(f), m
             time.sleep(0.03)
         return None, "no composited frame within %.0f s" % timeout, None
-    tmp = os.path.join(tmp_dir or os.path.join(HERE, "..", "captures", "scratch"), "composited_grab_%d.jpg" % os.getpid())
+    # The v4l2loopback mirror keeps serving its LAST frame when the feeder stops (seen 2026-11-21: a still at 13:00:58 got a
+    # 12:57:56 frame). Grab a few frames ~0.25 s apart and accept only if the picture changes (the HUD clock ticks every frame).
+    tmp = os.path.join(tmp_dir or os.path.join(HERE, "..", "captures", "scratch"), "composited_grab_%d_%%d.jpg" % os.getpid())
     os.makedirs(os.path.dirname(tmp), exist_ok=True)
     try:
-        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-frames:v", "1", "-q:v", "2", "-y", tmp],
-                       timeout=timeout, check=True, capture_output=True)
-        t = time.time(); b = open(tmp, "rb").read(); os.remove(tmp)
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-vf", "fps=4", "-frames:v", "3",
+                        "-q:v", "2", "-y", tmp], timeout=timeout, check=True, capture_output=True)
+        t = time.time()
+        fs = sorted(glob.glob(tmp.replace("%d", "*")))
+        imgs = [cv2.imread(f, cv2.IMREAD_GRAYSCALE) for f in fs]; b = open(fs[-1], "rb").read() if fs else None
+        for f in fs: os.remove(f)
+        if b is None: return None, "ffmpeg grab: no frame", None
+        if len(imgs) >= 2 and all(np.array_equal(imgs[0], x) for x in imgs[1:]):
+            return None, f"stale mirror: {device} served the same frame {len(imgs)}x (feeder not updating)", None
         return b, "ffmpeg:" + device, t
     except Exception as e:
         return None, f"ffmpeg grab failed: {e}", None

@@ -5,7 +5,10 @@ SplatCapture runs its own reader thread on /dev/shm/arcgrab (independent of the 
 `enabled`, writes a recording in the liverec.py format (OUT/NNNNN_{left,right}.y10p + frames.jsonl + stream.json) to
 captures/splat/splat_YYYYmmdd_HHMMSS/, ready for  tools/export_colmap.py DIR OUTDIR.
 A pair is stored when
-  * it is sharp (exposure-normalised Laplacian variance >= 0.5 x the running median of the recent frames),
+  * it is sharp: estimated motion blur f_export * t_exp * (omega + v / 1.5 m) <= max_blur_px (0.75 px at the export pinhole,
+    1600 px / 110 deg), omega / v from the poses of consecutive frames. Image sharpness scores do NOT work here (high-gain noise
+    keeps the Laplacian high, scene content dominates; re/blur_vs_sharp.py), the pose estimate separates sharp / smeared cleanly.
+    The old relative Laplacian test (>= 0.5 x running median) stays as a weak second check.
   * the cameras are synchronous and the pose is valid, and
   * its view is new: no stored view is closer than `min_dist` in (head position + 0.5 m/rad * viewing angle).
 So standing still stores nothing, slow walking stores a view every few cm, and revisits of covered space are skipped.
@@ -17,10 +20,13 @@ import cv2
 from arcshm import ArcShm
 
 W_ANG = 0.5
+LT = 4.36e-6                             # s per sensor line (exp_lines * LT = exposure time), = farstereo.LT
+F_EXPORT = 800 / np.tan(np.radians(55))  # focal length (px) of the splat export pinhole (export_colmap defaults 1600 px, 110 deg)
 
 
 class SplatCapture:
-    def __init__(self, root="captures/splat", min_dist=0.06, max_hz=3.0, max_gb=6.0, pair_tol=0.012):
+    def __init__(self, root="captures/splat", min_dist=0.06, max_hz=3.0, max_gb=6.0, pair_tol=0.012, max_blur_px=0.75):
+        self.max_blur_px = max_blur_px; self.n_blurry = 0
         self.root = root; self.min_dist = min_dist; self.max_hz = max_hz; self.max_bytes = max_gb * 1e9; self.pair_tol = pair_tol
         self.enabled = False; self.dir = None; self.n = 0; self.bytes = 0; self.msg = ""
         self._stop = False; self._thread = None; self.last_dir = None; self.export = None; self.export_msg = ""
@@ -59,7 +65,7 @@ class SplatCapture:
     def hud(self):
         e = self.export_state()
         if not self.enabled and not self.n: return e
-        return (e + "   " if e else "") + f"splat: {'REC' if self.enabled else 'idle'} {self.n} views {self.bytes / 1e9:.1f} GB{(' ' + self.msg) if self.msg else ''}"
+        return (e + "   " if e else "") + f"splat: {'REC' if self.enabled else 'idle'} {self.n} views {self.bytes / 1e9:.1f} GB, {self.n_blurry} blurred skipped{(' ' + self.msg) if self.msg else ''}"
 
     # ---- helpers -------------------------------------------------------------------------------------------------------
     @staticmethod
@@ -87,7 +93,7 @@ class SplatCapture:
                        devices=["/dev/video0 arcimx616 0-001a crop x=550", "/dev/video3 arcimx616 0-0010 crop x=250"]),
                   open(os.path.join(self.dir, "stream.json"), "w"), indent=1)
         self.log = open(os.path.join(self.dir, "frames.jsonl"), "w")
-        self.n = 0; self.bytes = 0; self.views = []; self.sharp = []; self.msg = ""
+        self.n = 0; self.bytes = 0; self.views = []; self.sharp = []; self.msg = ""; self.n_blurry = 0
 
     def _close(self):
         try: self.log.close()
@@ -97,7 +103,7 @@ class SplatCapture:
 
     # ---- thread ----------------------------------------------------------------------------------------------------------
     def _run(self):
-        self.shm = ArcShm(); last = -1; self.views = []; self.sharp = []; t_last = 0.0; was = False
+        self.shm = ArcShm(); last = -1; self.views = []; self.sharp = []; t_last = 0.0; was = False; prev = None
         while not self._stop:
             if self.enabled != was:
                 was = self.enabled
@@ -113,7 +119,17 @@ class SplatCapture:
             except TimeoutError:
                 continue
             last = m0["frame"]
+            P = np.asarray(m0["pose"]); blur = om = v = None
+            if prev is not None and 1e-3 < m0["ts"] - prev[1] < 0.1:      # consecutive frames (~32 ms); else unknown -> not stored
+                dt = m0["ts"] - prev[1]
+                om = float(np.linalg.norm(cv2.Rodrigues(prev[0][:, :3].T @ P[:, :3])[0]) / dt)
+                v = float(np.linalg.norm(P[:, 3] - prev[0][:, 3]) / dt)
+                blur = F_EXPORT * m0["exp_lines"] * LT * (om + v / 1.5)
+            prev = (P, m0["ts"])
             if time.monotonic() - t_last < 1.0 / self.max_hz: continue
+            if blur is None or blur > self.max_blur_px:
+                if blur is not None: self.n_blurry += 1
+                continue
             if not (m0["pose_valid"] and m1["pose_valid"]) or abs(m0["ts"] - m1["ts"]) > self.pair_tol: continue
             try:
                 sh = self._sharp(b0, m0, self.shm)
@@ -123,7 +139,8 @@ class SplatCapture:
                 if not self._novel(pos, z): continue
                 for name, b in (("left", b0), ("right", b1)):
                     with open(os.path.join(self.dir, f"{self.n:05d}_{name}.y10p"), "wb") as f: f.write(b)
-                rec = {"i": self.n}
+                rec = {"i": self.n, "blur_px": round(blur, 3), "omega_rad_s": round(om, 4), "v_m_s": round(v, 4),
+                       "blur_model": "f 560 px (1600 px / 110 deg pinhole) * t_exp * (omega + v / 1.5 m)"}
                 for name, m in (("left", m0), ("right", m1)):
                     rec[name] = dict(frame=m["frame"], ts=m["ts"], exp_lines=m["exp_lines"], gain_code=m["gain_code"], dgain=m["dgain"],
                                      pose=m["pose"].tolist(), pose_valid=m["pose_valid"], buf_flags=m["buf_flags"])
