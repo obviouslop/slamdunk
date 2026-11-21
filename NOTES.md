@@ -817,3 +817,8 @@ The Frame's stereo baseline is 6.4 cm: sigma_z = z^2/(f*B)*sigma_d = 0.77 m at 3
   conf>=0.3 0.593/0.126/0.52, conf>=0.5 0.635/0.110/0.33. LiveStereo.confidence now measures texture on the MATCHER INPUT
   (the colour-image version was ~0 indoors). pcserver --min-conf 0.3 (default) drops low-confidence pixels before TSDF.integrate.
 - Matcher tone curve: log default (re/tone_eval.py). Debug page: Bayer-coloured raw crop (PNG, 10-bit / 4).
+- Session UX (2026-11-21): no start delay / beeps / sleeps (pcsession.sh starts arcgrab, pcserver, viewer at once; pcserver waits for
+  /dev/shm/arcgrab itself). If SteamVR shows the app as paused, close the dashboard. Point-cloud scanning starts OFF (● POINTS).
+  Recording is the toolbox toggle ● REC (row 8; tools/recorder.py -> captures/liveN: liverec pairs 1 fps + poses.jsonl + thumbs,
+  composited view 2 fps, and the recording time range of the session pose log captures/logs/pcsession/hmd_500hz.txt that arcgrab
+  now always writes). pcsession.sh --record / --delay and the "Start and record" desktop action are gone.

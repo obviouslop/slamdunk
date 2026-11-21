@@ -34,6 +34,7 @@ import fiducials
 from origin import OriginTracker
 from farstereo import FarStereo, LT, _rot_angle
 import debugcap
+from recorder import Recorder
 from tags import TagWatcher
 from planes import PlaneTracker
 from splatcap import SplatCapture
@@ -80,6 +81,8 @@ ap.add_argument("--origin-mm", type=float, help="printed edge of the origin mark
 ap.add_argument("--origin-frame", action="store_true", help="save PLYs in the origin-marker frame (x right, y up, z out of the paper) "
                 "when the marker is locked; default: STAGE coordinates, with the marker pose in the <name>.ply.json sidecar")
 ap.add_argument("--passthrough", action="store_true", help="always publish depth-passthrough frames (else only when the viewer asks)")
+ap.add_argument("--pose-log", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "captures", "logs", "pcsession", "hmd_500hz.txt"),
+                help="arcgrab's session pose log; the viewer's REC toggle copies its time range into the recording")
 ap.add_argument("--seconds", type=float, default=0, help="stop after N s (0 = run forever)")
 ap.add_argument("--pair-tol", type=float, default=0.015, help="max |ts_L - ts_R| (s)")
 ap.add_argument("--cone", type=float, default=12.0, help="paint-mode cone half angle (deg)")
@@ -251,6 +254,7 @@ def take_still():
     write_status()
 
 
+recorder = Recorder(pose_log=a.pose_log)
 dbg_state = {"armed": False, "last": "", "n": 0}
 DEBUG_TRIGGER = f"{SHM}/pcdebug"      # `touch /dev/shm/pcdebug` arms a debug capture without the viewer
 
@@ -267,7 +271,7 @@ def take_debug(pair, bufs, info):
 def write_status(fps=None):
     write_json(STATUS_PATH, dict(fps=round(fps if fps is not None else last_fps, 1), points=npub, blocks=ts.nblocks,
                                  scan=scan, saved=saved, still=still, stills=n_stills, frame=last_frame,
-                                 debug=dbg_state["last"], debugs=dbg_state["n"],
+                                 debug=dbg_state["last"], debugs=dbg_state["n"], rec=recorder.hud(), rec_on=recorder.on,
                                  origin=origin.hud() if origin else "", far=far.hud() if far else "",
                                  splat=splatcap.hud() if splatcap else "", splat_on=bool(splatcap and splatcap.enabled), splat_dir=(splatcap.dir or "") if splatcap else "", splat_n=splatcap.n if splatcap else 0,
                                  splat_prog=(-1.0 if not splatcap or splatcap.export is None else (splatcap.progress() if splatcap.export.poll() is None else 1.0)) if splatcap else -1.0))
@@ -311,9 +315,11 @@ def handle_cmd(ctl):
 try:
     while not a.seconds or time.monotonic() - t0 < a.seconds:
         ctl = read_ctl()
-        scan = ctl.get("scan", ctl.get("mode", "auto")) if ctl else "auto"
+        scan = ctl.get("scan", ctl.get("mode", "off")) if ctl else "off"       # point-cloud scanning starts OFF (viewer POINTS toggle)
         if ctl:
             handle_cmd(ctl)
+        try: recorder.set(bool(ctl and ctl.get("rec")))                          # viewer ● REC toggle
+        except Exception as e: print("recorder:", e, flush=True)
         painting = bool(ctl and ctl.get("painting") and len(ctl.get("aim") or []) == 12)
         want_view = a.passthrough or bool(ctl and ctl.get("passthrough"))          # viewer shows the camera image (needs colour)
         occ_state["on"] = bool(ctl and ctl.get("occlude")) and not want_view     # occlusion-only: its own fast low-res thread
@@ -421,3 +427,4 @@ try:
                   f"{ts.nblocks} blocks, {npub} points, scan {scan}, blurry skipped {n_blurry}", flush=True)
 finally:
     stop = True
+    recorder.stop()

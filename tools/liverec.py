@@ -11,6 +11,10 @@ ap.add_argument("--force", action="store_true", help="allow overwriting an exist
 a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
 if not a.force and any(os.path.exists(os.path.join(a.out, f)) for f in ("frames.jsonl", "00000_left.y10p")):
     sys.exit(f"liverec: {a.out} already contains a recording (use a new directory or --force)")
+import signal
+quit_ = [False]
+def _quit(*_): quit_[0] = True
+signal.signal(signal.SIGTERM, _quit); signal.signal(signal.SIGINT, _quit)       # recorder.py stops us: finish files cleanly
 s = ArcShm()
 json.dump(dict(line_px=s.line_px, line_bytes=s.line_bytes, black=s.black, bayer="RGGB", cams=["left", "right"],
                devices=["/dev/video0 arcimx616 0-001a crop x=550", "/dev/video3 arcimx616 0-0010 crop x=250"]),
@@ -30,9 +34,10 @@ def pose_logger():
         tbin.write(np.ascontiguousarray(th_).tobytes())
         plog.write(json.dumps(dict(frame=m["frame"], ts=m["ts"], exp_lines=m["exp_lines"], pose_valid=m["pose_valid"], pose=m["pose"].tolist())) + "\n")
 th = threading.Thread(target=pose_logger, daemon=True); th.start()
-while time.monotonic() - t0 < a.seconds:
+while time.monotonic() - t0 < a.seconds and not quit_[0]:
     tn = time.monotonic()
-    m0, b0 = s.latest_packed(0, after_frame=last)
+    try: m0, b0 = s.latest_packed(0, after_frame=last, timeout=1.0)
+    except TimeoutError: continue
     m1, b1 = s.latest_packed(1)
     if abs(m1["ts"] - m0["ts"]) > 0.010:          # wait for the matching right frame
         try: m1, b1 = s.latest_packed(1, after_frame=m1["frame"], timeout=0.1)

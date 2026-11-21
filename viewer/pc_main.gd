@@ -106,6 +106,7 @@ var tags_on := true
 var plane_layer: PlaneLayer             # coarse fitted planes, 10 % translucent (tools/planes.py)
 var planes_on := false
 var splat_n_seen := 0
+var rec_on := false                     # session recording (tools/recorder.py: pairs + poses + composited -> captures/liveN)
 var splat_on := false                   # capture-for-splatting (tools/splatcap.py), independent of the point-cloud scanning
 var plane_accum := 0.0
 var far_on := true                          # wide-baseline far-range depth (tools/farstereo.py)
@@ -122,7 +123,7 @@ var size_idx := 2
 var alpha := 0.55
 
 var tool := "scan"
-var scanning := true
+var scanning := false                    # point-cloud scanning starts OFF (● POINTS)
 var painting := false
 var snap := true
 var free_dist := 0.6
@@ -319,6 +320,7 @@ func _build_scene() -> void:
 	palette.add_button("splat", "◉ SPLAT", 3, 7)
 	palette.add_button("splat_export", "EXPORT SPLAT", 3, 8)
 	palette.add_button("debug", "DEBUG CAP", 2, 8)
+	palette.add_button("liverec", "● REC", 1, 8)
 	palette.add_button("zone_mode", "EXCLUDE", 0, 6)
 	palette.add_button("zone_shape", "BOX", 1, 6)
 	palette.add_button("next_label", "NEXT LABEL", 3, 6)
@@ -623,6 +625,12 @@ func _on_palette(id: String) -> void:
 			_send_cmd("splat_export")
 			_say("splat export started: masks + depth + COLMAP dataset (see the status line)")
 			_sync_palette()
+		"liverec":
+			rec_on = not rec_on
+			_buzz("left_hand", 0.5, 0.06)
+			_say("recording ON: stereo pairs 1 fps + poses + headset view -> captures/liveN" if rec_on else "recording stopped")
+			_write_ctl()
+			_sync_palette()
 		"splat":
 			splat_on = not splat_on
 			_buzz("left_hand", 0.5, 0.06)
@@ -680,6 +688,7 @@ func _sync_palette() -> void:
 	palette.set_active("far", far_on)
 	palette.set_active("planes", planes_on)
 	palette.set_active("splat", splat_on, Palette.COLS["rec"])
+	palette.set_active("liverec", rec_on, Palette.COLS["rec"])
 	palette.set_active("zone_show", zones_shown)
 	palette.set_text("zone_show", "ZONES ON" if zones_shown else "ZONES OFF")
 	for id in ["sel_delete", "sel_keep", "sel_label"]:
@@ -1003,7 +1012,7 @@ func _write_ctl() -> void:
 			hands.append(m12)
 	var d := {"t_ms": Time.get_ticks_msec(), "scan": _scan_state(), "painting": painting and aim.size() == 12,
 		"aim": aim, "hands": hands, "cmd": cmd, "cmd_seq": cmd_seq, "name": save_name,
-		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on, "planes": planes_on, "splat": splat_on}
+		"passthrough": passthrough != null and passthrough.visible, "occlude": occlude, "tags": tags_on, "far": far_on, "planes": planes_on, "splat": splat_on, "rec": rec_on}
 	var f := FileAccess.open(CTL_PATH, FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(d))
@@ -1247,6 +1256,8 @@ func _update_status() -> void:
 		status.text += "   " + String(srv["origin"])
 	if String(srv.get("splat", "")) != "":
 		status.text += "   " + String(srv["splat"])
+	if String(srv.get("rec", "")) != "":
+		status.text += "   " + String(srv["rec"])
 	if far_on and String(srv.get("far", "")) != "":
 		status.text += "   " + String(srv["far"])
 	if not gnss.is_empty():
