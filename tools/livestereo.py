@@ -38,7 +38,7 @@ def unpack_raw(buf, W=2464, H=2464, S=3088):
 
 
 class LiveStereo:
-    def __init__(self, scale=0.5, max_depth=4.0, min_depth=0.25, cal=CAL, edge_rel=0.0, block=5, uniq=10, pscale=1.0, median=0):
+    def __init__(self, scale=0.5, max_depth=4.0, min_depth=0.25, cal=CAL, edge_rel=0.0, block=5, uniq=10, pscale=1.0, median=0, tone="log"):
         cams = {c["sourceCamera"]: c for c in json.load(open(cal))["cameras"]}
         self.KL, self.DL = _kd(cams["passthrough_left"]); self.KR, self.DR = _kd(cams["passthrough_right"])
         TL, TR = _cad_from_cam(cams["passthrough_left"]), _cad_from_cam(cams["passthrough_right"])
@@ -71,6 +71,7 @@ class LiveStereo:
                                           uniquenessRatio=uniq, speckleWindowSize=100, speckleRange=2, disp12MaxDiff=1,
                                           mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
         u, v = np.meshgrid(np.arange(n), np.arange(n)); self.uv = (u - P1[0, 2], v - P1[1, 2])
+        self.tone = tone    # matcher grey tone curve (see grey8); colours are not affected
         self.debug = None   # set to a dict: the next rectified()/depth() call stores its intermediate buffers there (debug capture)
 
     @staticmethod
@@ -88,8 +89,9 @@ class LiveStereo:
             m = cL.reshape(-1, 3).mean(0); wb = m.mean() / np.maximum(m, 1e-6)
         gL = cv2.cvtColor(cL, cv2.COLOR_BGR2GRAY); gR = cv2.cvtColor(cR, cv2.COLOR_BGR2GRAY)
         s = 255 / max(np.percentile(gL[::4, ::4], 99.5), 1)
-        rL = cv2.remap(np.clip(gL * s, 0, 255).astype(np.uint8), *self.mapL, cv2.INTER_LINEAR)
-        rR = cv2.remap(np.clip(gR * s, 0, 255).astype(np.uint8), *self.mapR, cv2.INTER_LINEAR)
+        g8L, g8R = self.grey8(gL, gR, s)
+        rL = cv2.remap(g8L, *self.mapL, cv2.INTER_LINEAR)
+        rR = cv2.remap(g8R, *self.mapR, cv2.INTER_LINEAR)
         rc = cv2.remap(cL, *self.mapL, cv2.INTER_LINEAR)
         mL, mR = (rL, rR) if self.left_first else (np.ascontiguousarray(rL[:, ::-1]), np.ascontiguousarray(rR[:, ::-1]))
         draw = self.sgbm.compute(mL, mR)                     # int16, 1/16 px, matcher orientation (mirrored if not left_first)
@@ -102,10 +104,34 @@ class LiveStereo:
             disp = np.where(np.abs(dm - disp) < 1.0, disp, -1)
         if self.debug is not None:
             self.debug.update(binned_L=cL, binned_R=cR, wb=np.asarray(wb, np.float32), grey_gain=np.float32(s),
-                              grey_L=np.clip(gL * s, 0, 255).astype(np.uint8), grey_R=np.clip(gR * s, 0, 255).astype(np.uint8),
+                              grey_L=g8L, grey_R=g8R, tone=np.array(self.tone),
                               rect_grey_L=rL, rect_grey_R=rR, matcher_in_L=mL, matcher_in_R=mR, matcher_out_int16=draw,
                               disp_sgbm=np.ascontiguousarray(disp_sgbm), disp=np.ascontiguousarray(disp), rect_colour_raw=rc)
         return disp, rc, wb, s
+
+    def grey8(self, gL, gR, s):
+        """float grey (raw units, more than 8 bits after binning) -> uint8 matcher input with the SAME curve for both cameras.
+        x = g * s / 255 (1.0 = 99.5th percentile of the left image).
+          linear: 255 x (dark scenes with a lamp in view end up in a few grey levels)
+          sqrt:   255 sqrt(x)
+          log:    255 log1p(50 x) / log1p(50)   (DEFAULT: best multi-view consistency on live16/17/19/20, re/tone_eval.py)
+          auto:   255 x^gamma, gamma per frame so the median maps to 96, clamped to [0.3, 1]"""
+        if self.tone == "linear":            # exactly the old behaviour (no LUT quantisation)
+            return np.clip(gL * s, 0, 255).astype(np.uint8), np.clip(gR * s, 0, 255).astype(np.uint8)
+        x = (np.arange(4096, dtype=np.float32) + 0.5) / 4096          # LUT over x in [0, 1], 4096 steps (> 10 bit)
+        if self.tone == "sqrt":
+            lut = 255 * np.sqrt(x)
+        elif self.tone == "log":
+            lut = 255 * np.log1p(50 * x) / np.log1p(50)
+        elif self.tone == "auto":
+            med = float(np.median(gL[::4, ::4])) * s / 255
+            gam = float(np.clip(np.log(96 / 255) / np.log(min(max(med, 1e-4), 0.99)), 0.3, 1.0))
+            lut = 255 * np.power(x, gam)
+        else:
+            raise ValueError(f"tone {self.tone}")
+        lut = (lut + 0.5).astype(np.uint8); q = s / 255 * 4096
+        f = lambda g: lut[np.clip(g * q, 0, 4095).astype(np.int32)]
+        return f(gL), f(gR)
 
     def rectified_rgb_pair(self, rawL, rawR, half=False):
         """-> (left, right) rectified RGB uint8 with the SAME white balance / tone as depth()'s colour output (for stereo viewing)."""

@@ -6,7 +6,8 @@ captures/stills/<YYYYmmdd_HHMMSS_mmm>/   (everything save_still writes, see tool
   pipeline.npz    all buffers (np.load(..., allow_pickle=False)); names/shapes/dtypes/meaning in pipeline.json "buffers"
   pipeline.json   manifest: per-buffer description, stage order, timings, matcher + rectification parameters, blur gate
                   decision, poses actually used, pcserver arguments
-  preview/*.png   quick-look images (rectified grey pair, disparity / depth colour maps, masks, confidence)
+  index.html      pipeline trace page (tools/debugreport.py): every stage with images, timings, automatic findings
+  preview/*.jpg   its images
 
 Stage order (= tools/pcserver.py main loop):
   raw RAW10 (left.y10p/right.y10p) -> bin_raw10 (binned_L/R: half-res BGR float, black removed)
@@ -21,6 +22,7 @@ import numpy as np
 import cv2
 
 import stills
+import debugreport
 
 DESCR = {
     "binned_L": "half-res BGR float32 (raw units, black removed), output of tsdf.bin_raw10 (2x2 binning demosaic)",
@@ -79,17 +81,9 @@ def save(shm, ls, pair, bufs, info, out_root=stills.OUT):
     man["timings_ms"]["write_pipeline"] = round((time.monotonic() - t0 - t_still) * 1000, 1)
     with open(os.path.join(d, "pipeline.json"), "w") as f:
         json.dump(man, f, indent=1)
-    # quick-look previews
-    pv = os.path.join(d, "preview"); os.makedirs(pv, exist_ok=True)
-    try:
-        cv2.imwrite(os.path.join(pv, "rect_pair.png"), np.hstack([arrs["rect_grey_L"], arrs["rect_grey_R"]]))
-        dp = arrs["disp"]; ok = dp > 0
-        cv2.imwrite(os.path.join(pv, "disp.png"), _cmap(dp, 0, max(float(np.percentile(dp[ok], 99)) if ok.any() else 1, 1), ok))
-        Z = arrs["Z"]; zf = arrs.get("Z_fused", Z)
-        cv2.imwrite(os.path.join(pv, "depth.png"), _cmap(-Z, -float(info.get("far_m", 4.0)), -ls.min_depth, Z > 0))
-        cv2.imwrite(os.path.join(pv, "depth_fused.png"), _cmap(-zf, -float(info.get("far_m", 4.0)), -ls.min_depth, zf > 0))
-        if "conf" in arrs: cv2.imwrite(os.path.join(pv, "conf.png"), (255 * arrs["conf"]).astype(np.uint8))
-        if "hand_mask" in arrs: cv2.imwrite(os.path.join(pv, "hand_mask.png"), arrs["hand_mask"].astype(np.uint8) * 255)
+    try:                                         # pipeline trace page: DIR/index.html + DIR/preview/*.jpg
+        t1 = time.monotonic(); debugreport.build(d)
+        print(f"debug report: {d}/index.html ({(time.monotonic() - t1) * 1000:.0f} ms)", flush=True)
     except Exception as e:
-        print("debugcap previews:", e, flush=True)
+        print("debug report failed:", e, flush=True)
     return d
